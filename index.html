@@ -106,7 +106,7 @@
         </div>
       </div>
 
-      <div class="stats-grid">
+      <div class="stats-grid stats-grid-3">
         <div class="stat-card">
           <div class="stat-icon expense-icon">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 12a11.05 11.05 0 0 0-22 0zm-5 7a3 3 0 0 1-6 0v-7"/></svg>
@@ -134,7 +134,7 @@
           <div class="stat-info">
             <div class="stat-label">Net Balance</div>
             <div class="stat-value" id="dash-balance">₱0.00</div>
-            <div class="stat-sub">this month</div>
+            <div class="stat-sub">after expenses &amp; paid needs</div>
           </div>
         </div>
       </div>
@@ -152,6 +152,19 @@
           </div>
           <div id="recent-txns"></div>
         </div>
+      </div>
+
+      <!-- Needs Quick View -->
+      <div class="panel" style="margin-top:0">
+        <div class="panel-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+          <div class="section-title">📋 Needs List</div>
+          <div style="display:flex;align-items:center;gap:1rem">
+            <div id="dash-needs-unpaid" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--danger)"></div>
+            <div id="dash-needs-total" style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700"></div>
+          </div>
+        </div>
+        <div id="dash-needs-breakdown"></div>
+        <div id="dash-needs-list" style="margin-top:0.75rem"></div>
       </div>
     </div>
 
@@ -193,11 +206,6 @@
         <div class="form-group" id="budget-bucket-group" style="display:none">
           <label class="form-label">Budget Bucket</label>
           <div class="bucket-toggle">
-            <button class="bucket-btn" data-bucket="needs" onclick="selectBucket('needs')">
-              <span class="bucket-icon">🏠</span>
-              <span class="bucket-lbl">Needs</span>
-              <span class="bucket-pct">50%</span>
-            </button>
             <button class="bucket-btn" data-bucket="wants" onclick="selectBucket('wants')">
               <span class="bucket-icon">🎉</span>
               <span class="bucket-lbl">Wants</span>
@@ -315,8 +323,65 @@
             </div>
             <div class="bucket-txn-list" id="b50-savings-txns"></div>
           </div>
+        </div><!-- /bucket-cards -->
+
+        <!-- NEEDS SECTION -->
+        <div class="needs-section">
+          <div class="needs-section-header">
+            <div style="display:flex;align-items:center;gap:0.6rem">
+              <span style="font-size:1.1rem">📋</span>
+              <div>
+                <div style="font-weight:700;font-size:14px">Needs List</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:1px">Track items you need to pay for</div>
+              </div>
+            </div>
+            <button class="needs-add-btn" onclick="openAddNeed()">+ Add Need</button>
+          </div>
+
+          <!-- Inline form (hidden by default) -->
+          <div id="needs-form-panel" style="display:none">
+            <div class="needs-form-inner">
+              <div class="needs-form-title-row">
+                <span id="need-form-title" style="font-size:13px;font-weight:700">Add Need</span>
+                <button class="need-cancel-btn" onclick="cancelNeedForm()">Cancel</button>
+              </div>
+              <div class="needs-form-fields">
+                <div class="form-group" style="margin-bottom:0">
+                  <label class="form-label">Title</label>
+                  <input type="text" id="need-input-title" placeholder="e.g. Electric bill, Rent…">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                  <label class="form-label">Description <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+                  <input type="text" id="need-input-desc" placeholder="Any details…">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                  <label class="form-label">Price (₱)</label>
+                  <input type="number" id="need-input-price" placeholder="0.00" min="0" step="0.01">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                  <label class="form-label">Status</label>
+                  <select id="need-input-status">
+                    <option value="unpaid">Unpaid</option>
+                    <option value="paid">Paid</option>
+                  </select>
+                </div>
+              </div>
+              <button class="submit-btn" id="need-save-btn" onclick="saveNeed()" style="margin-top:0.75rem">Save</button>
+            </div>
+          </div>
+
+          <!-- Needs list header -->
+          <div class="needs-list-header">
+            <span>Title</span>
+            <span>Cost</span>
+          </div>
+
+          <!-- Needs list -->
+          <div id="needs-list"></div>
+
         </div>
-      </div>
+
+      </div><!-- /budget50-content -->
     </div>
 
     <!-- HISTORY VIEW -->

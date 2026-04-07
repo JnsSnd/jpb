@@ -1,7 +1,7 @@
 /* ============================================================
    CONSTANTS
    ============================================================ */
-const HARDCODED_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxQXNDCi3Kk4CGeuqp1j_uU9EtRsI3JKznBXXp-9ikkCOWt_odbPLp32EIeqHoWadgJCQ/exec';
+const HARDCODED_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzxyaZnMsEM3Vnv8Zq0ZLBo7FxKiUXU48bS2SgxTq5ccL6fzJwCkDTw_b7NiItpjnftaw/exec';
 
 const CATS = [
   { id: 'food',          label: 'Food',          emoji: '🍔', color: '#ff8c42' },
@@ -11,6 +11,7 @@ const CATS = [
   { id: 'bills',         label: 'Bills',          emoji: '💡', color: '#ffaa00' },
   { id: 'entertainment', label: 'Entertainment',  emoji: '🎮', color: '#4ecdc4' },
   { id: 'education',     label: 'Education',      emoji: '📚', color: '#a78bfa' },
+  { id: 'needs',         label: 'Needs',          emoji: '📋', color: '#4da6ff' },
   { id: 'other',         label: 'Other',          emoji: '📦', color: '#888888' },
 ];
 
@@ -27,12 +28,15 @@ const BUCKET_RULES = { needs: 0.50, wants: 0.30, savings: 0.20 };
 let SCRIPT_URL = '';
 let STATE = {
   transactions:  [],
+  needs:         [],
+  needsHistory:  [],
   currentMonth:  new Date().getMonth(),
   currentYear:   new Date().getFullYear(),
   selectedType:  'expense',
   selectedCat:   'food',
-  selectedBucket: 'needs',
+  selectedBucket: 'wants',
   theme:         'dark',
+  needsEditId:   null,
 };
 
 /* ============================================================
@@ -69,6 +73,8 @@ async function connectScript() {
   try {
     const data = await api('getAll');
     STATE.transactions = (data.transactions || []).sort((a, b) => new Date(b.date) - new Date(a.date));
+    STATE.needs = data.needs || [];
+    STATE.needsHistory = (data.needsHistory || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     localStorage.setItem('budget_script_url', url);
     launchApp();
   } catch (e) {
@@ -217,6 +223,13 @@ function monthTxns(m, y) {
 /* ============================================================
    DASHBOARD
    ============================================================ */
+
+// Returns needs belonging to a specific month/year (by their month field)
+function monthNeeds(m, y) {
+  const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+  return STATE.needs.filter(n => n.month === key);
+}
+
 function renderDashboard() {
   const { currentMonth: m, currentYear: y } = STATE;
   const label = `${MONTHS[m]} ${y}`;
@@ -227,19 +240,27 @@ function renderDashboard() {
   const incomes  = txns.filter(t => t.type === 'income');
   const spent   = expenses.reduce((s, t) => s + t.amount, 0);
   const income  = incomes.reduce((s, t)  => s + t.amount, 0);
-  const balance = income - spent;
 
-  document.getElementById('dash-spent').textContent     = fmt(spent);
-  document.getElementById('dash-tx-count').textContent  = `${expenses.length} transaction${expenses.length !== 1 ? 's' : ''}`;
+  // Paid needs for this month treated as transactions
+  const mNeeds     = monthNeeds(m, y);
+  const paidNeeds  = mNeeds.filter(n => n.status === 'paid').reduce((s, n) => s + n.price, 0);
+  const totalSpent = spent + paidNeeds;
+  const balance    = income - totalSpent;
+  const paidNeedsList = mNeeds.filter(n => n.status === 'paid');
+
+  document.getElementById('dash-spent').textContent     = fmt(totalSpent);
+  document.getElementById('dash-tx-count').textContent  = `${expenses.length + paidNeedsList.length} transaction${(expenses.length + paidNeedsList.length) !== 1 ? 's' : ''}`;
   document.getElementById('dash-income').textContent    = fmt(income);
   document.getElementById('dash-inc-count').textContent = `${incomes.length} entr${incomes.length !== 1 ? 'ies' : 'y'}`;
+
   const balEl = document.getElementById('dash-balance');
-  balEl.textContent = (balance >= 0 ? '+' : '-') + fmt(balance);
+  balEl.textContent = (balance < 0 ? '-' : '') + fmt(balance);
   balEl.style.color = balance >= 0 ? 'var(--accent)' : 'var(--danger)';
 
-  // Category breakdown
+  // Category breakdown — include paid needs as 'needs' category
   const totals = {};
   expenses.forEach(t => totals[t.category] = (totals[t.category] || 0) + t.amount);
+  if (paidNeeds > 0) totals['needs'] = (totals['needs'] || 0) + paidNeeds;
   const max    = Math.max(...Object.values(totals), 1);
   const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
 
@@ -256,10 +277,23 @@ function renderDashboard() {
       }).join('')
     : '<div class="empty-state" style="padding:1rem 0"><p>No expenses this month</p></div>';
 
-  // Recent transactions
-  const recent = txns.slice(0, 8);
-  document.getElementById('recent-txns').innerHTML = recent.length
-    ? recent.map(t => {
+  // Recent transactions — merge regular txns + paid needs as virtual txns
+  const needCat = catInfo('needs');
+  const needVirtualTxns = paidNeedsList.map(n => ({
+    _isNeed: true,
+    id:      n.id,
+    type:    'expense',
+    category:'needs',
+    desc:    n.title,
+    amount:  n.price,
+    date:    n.paidDate || n.month,
+  }));
+  const allRecent = [...txns, ...needVirtualTxns]
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 8);
+
+  document.getElementById('recent-txns').innerHTML = allRecent.length
+    ? allRecent.map(t => {
         const cat = t.type === 'income'
           ? { emoji: '💰', color: 'var(--accent)', label: 'Income' }
           : catInfo(t.category);
@@ -267,7 +301,7 @@ function renderDashboard() {
           <div class="txn-icon" style="background:${cat.color}22">${cat.emoji}</div>
           <div class="txn-info">
             <div class="txn-desc">${t.desc || cat.label}</div>
-            <div class="txn-meta">${cat.label} · ${t.date}</div>
+            <div class="txn-meta">${cat.label} · ${String(t.date).slice(0, 10)}</div>
           </div>
           <div class="txn-amount ${t.type === 'income' ? 'positive' : ''}">
             ${t.type === 'income' ? '+' : '-'}${fmt(t.amount)}
@@ -275,14 +309,44 @@ function renderDashboard() {
         </div>`;
       }).join('')
     : '<div class="empty-state" style="padding:1rem 0"><p>No activity this month</p></div>';
+
+  // Needs quick-view
+  renderDashboardNeeds();
 }
 
-/* ============================================================
-   ADD FORM
-   ============================================================ */
+function renderDashboardNeeds() {
+  const el = document.getElementById('dash-needs-list');
+  if (!el) return;
+  const { currentMonth: m, currentYear: y } = STATE;
+  const needs       = monthNeeds(m, y);
+  const totalPrice  = needs.reduce((s, n) => s + n.price, 0);
+  const unpaidTotal = needs.filter(n => n.status === 'unpaid').reduce((s, n) => s + n.price, 0);
+
+  document.getElementById('dash-needs-total').textContent  = fmt(totalPrice);
+  document.getElementById('dash-needs-unpaid').textContent = fmt(unpaidTotal) + ' unpaid';
+
+  const breakdownEl = document.getElementById('dash-needs-breakdown');
+  if (breakdownEl) breakdownEl.innerHTML = '';
+
+  if (!needs.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:1rem 0"><p>No needs added yet</p></div>';
+    return;
+  }
+  el.innerHTML = needs.map(n => `
+    <div class="needs-quick-item">
+      <div class="needs-quick-title">${n.title}</div>
+      <div class="needs-quick-right">
+        <span class="needs-quick-price">${fmt(n.price)}</span>
+        <span class="needs-status-badge ${n.status === 'paid' ? 'paid' : 'unpaid'}">${n.status === 'paid' ? 'Paid' : 'Unpaid'}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+
 function buildCatSelect() {
   const sel = document.getElementById('cat-select');
-  sel.innerHTML = CATS.map(c =>
+  sel.innerHTML = CATS.filter(c => c.id !== 'needs').map(c =>
     `<option value="${c.id}">${c.emoji} ${c.label}</option>`
   ).join('');
   sel.value = STATE.selectedCat;
@@ -361,33 +425,35 @@ function renderBudget50() {
   const expenses = txns.filter(t => t.type === 'expense');
 
   const noIncomeMsg = document.getElementById('no-income-msg');
-  const content     = document.getElementById('budget50-content');
 
   noIncomeMsg.style.display = income === 0 ? 'flex' : 'none';
 
   // Always show content, just with 0s if no income
-  const needs   = income * BUCKET_RULES.needs;
-  const wants   = income * BUCKET_RULES.wants;
-  const savings = income * BUCKET_RULES.savings;
+  const needsBudget   = income * BUCKET_RULES.needs;
+  const wantsBudget   = income * BUCKET_RULES.wants;
+  const savingsBudget = income * BUCKET_RULES.savings;
 
   document.getElementById('b50-income').textContent    = fmt(income);
-  document.getElementById('b50-needs-target').textContent   = fmt(needs);
-  document.getElementById('b50-wants-target').textContent   = fmt(wants);
-  document.getElementById('b50-savings-target').textContent = fmt(savings);
+  document.getElementById('b50-needs-target').textContent   = fmt(needsBudget);
+  document.getElementById('b50-wants-target').textContent   = fmt(wantsBudget);
+  document.getElementById('b50-savings-target').textContent = fmt(savingsBudget);
 
   // Separate expenses by bucket (manual selection)
   const needsTxns   = expenses.filter(t => t.bucket === 'needs');
   const wantsTxns   = expenses.filter(t => t.bucket === 'wants');
   const savingsTxns = expenses.filter(t => t.bucket === 'savings');
-  // Unassigned fallback
-  const unassigned  = expenses.filter(t => !t.bucket);
 
-  const needsSpent   = needsTxns.reduce((s, t) => s + t.amount, 0);
-  const wantsSpent   = wantsTxns.reduce((s, t) => s + t.amount, 0);
-  const savingsSpent = savingsTxns.reduce((s, t) => s + t.amount, 0);
+  const needsTxnSpent  = needsTxns.reduce((s, t) => s + t.amount, 0);
+  const wantsSpent     = wantsTxns.reduce((s, t) => s + t.amount, 0);
+  const savingsSpent   = savingsTxns.reduce((s, t) => s + t.amount, 0);
+
+  // Paid needs for this month go toward Needs budget
+  const mNeeds = monthNeeds(m, y);
+  const paidNeedsTotal = mNeeds.filter(n => n.status === 'paid').reduce((s, n) => s + n.price, 0);
+  const needsSpent     = needsTxnSpent + paidNeedsTotal;
 
   const totalAllocated = needsSpent + wantsSpent + savingsSpent;
-  const remaining = income - totalAllocated;
+  const remaining      = income - totalAllocated;
 
   document.getElementById('b50-allocated').textContent = fmt(totalAllocated);
   const remEl = document.getElementById('b50-remaining');
@@ -395,19 +461,24 @@ function renderBudget50() {
   remEl.style.color = remaining >= 0 ? 'var(--accent)' : 'var(--danger)';
 
   // Progress bars
-  function setPct(barId, spentId, pctId, spent, target, bucketColor) {
+  function setPct(barId, spentId, pctId, spent, target) {
     const pct = target > 0 ? Math.min(spent / target * 100, 100) : 0;
     const over = target > 0 && spent > target;
     const bar  = document.getElementById(barId);
     bar.style.width = pct + '%';
-    if (over) bar.style.background = 'var(--danger)';
+    bar.style.background = over ? 'var(--danger)' : '';
     document.getElementById(spentId).textContent = fmt(spent) + (over ? ' ⚠ Over!' : ' spent');
     document.getElementById(pctId).textContent   = pct.toFixed(0) + '%';
   }
 
-  setPct('b50-needs-bar',   'b50-needs-spent',   'b50-needs-pct',   needsSpent,   needs,   'needs');
-  setPct('b50-wants-bar',   'b50-wants-spent',   'b50-wants-pct',   wantsSpent,   wants,   'wants');
-  setPct('b50-savings-bar', 'b50-savings-spent', 'b50-savings-pct', savingsSpent, savings, 'savings');
+  setPct('b50-needs-bar',   'b50-needs-spent',   'b50-needs-pct',   needsSpent,   needsBudget);
+  if (paidNeedsTotal > 0) {
+    const spentEl = document.getElementById('b50-needs-spent');
+    const over = needsSpent > needsBudget;
+    spentEl.innerHTML = `${fmt(needsSpent)}${over ? ' ⚠ Over!' : ' spent'} <span style="font-size:10px;color:var(--muted)">(incl. ${fmt(paidNeedsTotal)} paid needs)</span>`;
+  }
+  setPct('b50-wants-bar',   'b50-wants-spent',   'b50-wants-pct',   wantsSpent,   wantsBudget);
+  setPct('b50-savings-bar', 'b50-savings-spent', 'b50-savings-pct', savingsSpent, savingsBudget);
 
   // Transaction lists
   function renderBucketTxns(containerId, txnsList) {
@@ -431,13 +502,246 @@ function renderBudget50() {
   renderBucketTxns('b50-needs-txns',   needsTxns);
   renderBucketTxns('b50-wants-txns',   wantsTxns);
   renderBucketTxns('b50-savings-txns', savingsTxns);
+
+  // Render the Needs CRUD section below (month-scoped)
+  renderNeedsList();
+}
+
+/* ============================================================
+   NEEDS CRUD
+   ============================================================ */
+function renderNeedsList() {
+  const el = document.getElementById('needs-list');
+  if (!el) return;
+
+  const { currentMonth: m, currentYear: y } = STATE;
+  const needs = monthNeeds(m, y);
+
+  if (!needs.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:1.5rem 0"><p>No needs for this month yet</p></div>';
+    return;
+  }
+
+  el.innerHTML = needs.map(n => `
+    <div class="need-item" id="need-item-${n.id}">
+      <div class="need-item-main">
+        <div class="need-item-title">${n.title}</div>
+        ${n.desc ? `<div class="need-item-desc">${n.desc}</div>` : ''}
+      </div>
+      <div class="need-item-right">
+        <span class="need-item-price">${fmt(n.price)}</span>
+        <select class="need-status-select ${n.status === 'paid' ? 'paid' : 'unpaid'}"
+                onchange="changeNeedStatus('${n.id}', this.value)">
+          <option value="unpaid" ${n.status === 'unpaid' ? 'selected' : ''}>Unpaid</option>
+          <option value="paid"   ${n.status === 'paid'   ? 'selected' : ''}>Paid</option>
+        </select>
+        <button class="need-edit-btn" onclick="openEditNeed('${n.id}')" title="Edit">✏️</button>
+        <button class="need-delete-btn" onclick="deleteNeed('${n.id}')" title="Delete">×</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleNeedsHistory() {
+  const body    = document.getElementById('needs-history-body');
+  const chevron = document.getElementById('needs-history-chevron');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? 'block' : 'none';
+  if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : '';
+  if (open) renderNeedsHistory();
+}
+
+function renderNeedsHistory() {
+  const el = document.getElementById('needs-history-list');
+  if (!el) return;
+  const history = STATE.needsHistory;
+  if (!history.length) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:0.75rem 0;text-align:center">No status changes recorded yet</div>';
+    return;
+  }
+  el.innerHTML = history.slice(0, 30).map(h => {
+    // timestamp is stored as UTC ISO string, convert to PH time (UTC+8)
+    const ts  = new Date(h.timestamp);
+    const phOffset = 8 * 60; // PH is UTC+8
+    const phTime = new Date(ts.getTime() + phOffset * 60000);
+    const dateStr = phTime.toISOString().slice(0, 10); // YYYY-MM-DD
+    const hours   = phTime.getUTCHours().toString().padStart(2, '0');
+    const mins    = phTime.getUTCMinutes().toString().padStart(2, '0');
+    const timeStr = `${hours}:${mins}`;
+    const toPaid = h.toStatus === 'paid';
+    return `<div class="needshx-item">
+      <div class="needshx-icon ${toPaid ? 'paid' : 'unpaid'}">${toPaid ? '✓' : '↩'}</div>
+      <div class="needshx-info">
+        <div class="needshx-title">${h.needTitle}</div>
+        <div class="needshx-meta">
+          <span class="needs-status-badge ${h.fromStatus}" style="cursor:default;font-size:9px;padding:1px 6px">${h.fromStatus}</span>
+          <span style="color:var(--muted);font-size:11px">→</span>
+          <span class="needs-status-badge ${h.toStatus}" style="cursor:default;font-size:9px;padding:1px 6px">${h.toStatus}</span>
+        </div>
+      </div>
+      <div class="needshx-right">
+        <div class="needshx-price">${fmt(h.price)}</div>
+        <div class="needshx-time">${dateStr} ${timeStr}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openAddNeed() {
+  STATE.needsEditId = null;
+  document.getElementById('need-form-title').textContent = 'Add Need';
+  document.getElementById('need-input-title').value  = '';
+  document.getElementById('need-input-desc').value   = '';
+  document.getElementById('need-input-price').value  = '';
+  document.getElementById('need-input-status').value = 'unpaid';
+  document.getElementById('needs-form-panel').style.display = 'block';
+  document.getElementById('need-input-title').focus();
+}
+
+function openEditNeed(id) {
+  const n = STATE.needs.find(x => x.id === id);
+  if (!n) return;
+  STATE.needsEditId = id;
+  document.getElementById('need-form-title').textContent = 'Edit Need';
+  document.getElementById('need-input-title').value  = n.title;
+  document.getElementById('need-input-desc').value   = n.desc || '';
+  document.getElementById('need-input-price').value  = n.price;
+  document.getElementById('need-input-status').value = n.status;
+  document.getElementById('needs-form-panel').style.display = 'block';
+  document.getElementById('need-input-title').focus();
+}
+
+function cancelNeedForm() {
+  document.getElementById('needs-form-panel').style.display = 'none';
+  STATE.needsEditId = null;
+}
+
+async function saveNeed() {
+  const title  = document.getElementById('need-input-title').value.trim();
+  const desc   = document.getElementById('need-input-desc').value.trim();
+  const price  = parseFloat(document.getElementById('need-input-price').value);
+  const status = document.getElementById('need-input-status').value;
+
+  if (!title)          { toast('Title is required', 'error'); return; }
+  if (!price || price <= 0) { toast('Enter a valid price', 'error'); return; }
+
+  const saveBtn = document.getElementById('need-save-btn');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving…';
+  setSyncing('syncing');
+
+  const isEdit = !!STATE.needsEditId;
+  const { currentMonth: m, currentYear: y } = STATE;
+  const monthKey = `${y}-${String(m + 1).padStart(2, '0')}`;
+  const id = isEdit ? STATE.needsEditId : (Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
+  // Preserve existing month if editing, otherwise stamp current month
+  const existingNeed = isEdit ? STATE.needs.find(x => x.id === id) : null;
+  const month = (existingNeed && existingNeed.month) ? existingNeed.month : monthKey;
+  const entry = { id, title, desc, price, status, month };
+
+  try {
+    if (isEdit) {
+      await api('updateNeed', entry);
+      const idx = STATE.needs.findIndex(x => x.id === id);
+      if (idx !== -1) STATE.needs[idx] = entry;
+    } else {
+      await api('addNeed', entry);
+      STATE.needs.push(entry);
+    }
+
+    cancelNeedForm();
+    renderNeedsList();
+    renderDashboardNeeds();
+    const activeBudget = document.getElementById('view-budget50');
+    if (activeBudget && activeBudget.classList.contains('active')) renderBudget50();
+    setSyncing('live');
+    toast(isEdit ? 'Need updated ✓' : 'Need added ✓', 'success');
+  } catch (e) {
+    setSyncing('error');
+    toast('Save failed: ' + e.message, 'error');
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save';
+  }
+}
+
+// Called when status dropdown on a need row changes — auto-saves immediately
+async function changeNeedStatus(id, newStatus) {
+  const n = STATE.needs.find(x => x.id === id);
+  if (!n || n.status === newStatus) return;
+  // Record the date it was paid (PH time YYYY-MM-DD)
+  const nowPH = new Date(Date.now() + 8 * 60 * 60000);
+  const paidDate = newStatus === 'paid' ? nowPH.toISOString().slice(0, 10) : (n.paidDate || null);
+  const updated = { ...n, status: newStatus, paidDate };
+  const hxEntry = {
+    id:         Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    needId:     n.id,
+    needTitle:  n.title,
+    fromStatus: n.status,
+    toStatus:   newStatus,
+    price:      n.price,
+    timestamp:  new Date().toISOString(),
+  };
+  setSyncing('syncing');
+  // Optimistic update
+  const idx = STATE.needs.findIndex(x => x.id === id);
+  STATE.needs[idx] = updated;
+  STATE.needsHistory.unshift(hxEntry);
+  renderNeedsList();
+  renderDashboardNeeds();
+  renderDashboard();
+  const activeBudget = document.getElementById('view-budget50');
+  if (activeBudget && activeBudget.classList.contains('active')) renderBudget50();
+  try {
+    await api('updateNeed', updated);
+    await api('addNeedsHistory', hxEntry);
+    setSyncing('live');
+    toast(`Marked as ${newStatus} ✓`, 'success');
+  } catch (e) {
+    // Rollback
+    STATE.needs[idx] = n;
+    STATE.needsHistory.shift();
+    renderNeedsList();
+    setSyncing('error');
+    toast('Update failed: ' + e.message, 'error');
+  }
+}
+
+// Keep old toggle for compatibility if called anywhere
+async function toggleNeedStatus(id) {
+  const n = STATE.needs.find(x => x.id === id);
+  if (!n) return;
+  await changeNeedStatus(id, n.status === 'paid' ? 'unpaid' : 'paid');
+}
+
+async function deleteNeed(id) {
+  if (!confirm('Delete this need?')) return;
+  setSyncing('syncing');
+  try {
+    await api('deleteNeed', { id });
+    STATE.needs = STATE.needs.filter(x => x.id !== id);
+    renderNeedsList();
+    renderDashboardNeeds();
+    const activeBudget = document.getElementById('view-budget50');
+    if (activeBudget && activeBudget.classList.contains('active')) renderBudget50();
+    setSyncing('live');
+    toast('Deleted', 'success');
+  } catch (e) {
+    setSyncing('error');
+    toast('Delete failed: ' + e.message, 'error');
+  }
 }
 
 /* ============================================================
    HISTORY
    ============================================================ */
 function buildHistoryFilters() {
-  const months = [...new Set(STATE.transactions.map(t => t.date.slice(0, 7)))].sort().reverse();
+  // Collect months from both transactions and needs
+  const txMonths = STATE.transactions.map(t => t.date.slice(0, 7));
+  const needMonths = STATE.needs.map(n => n.month).filter(Boolean);
+  const months = [...new Set([...txMonths, ...needMonths])].sort().reverse();
+
   document.getElementById('hist-month').innerHTML =
     '<option value="">All months</option>' +
     months.map(m => `<option value="${m}">${MONTHS[parseInt(m.split('-')[1]) - 1]} ${m.split('-')[0]}</option>`).join('');
@@ -453,6 +757,7 @@ function renderHistory() {
   const cF   = document.getElementById('hist-cat').value;
   const tF   = document.getElementById('hist-type').value;
 
+  // Regular transactions
   const txns = STATE.transactions.filter(t => {
     if (mF && !t.date.startsWith(mF)) return false;
     if (cF && t.category !== cF)      return false;
@@ -460,9 +765,28 @@ function renderHistory() {
     return true;
   });
 
+  // Paid needs as virtual expense rows — filter by their month
+  const paidNeedRows = (tF === 'income') ? [] : STATE.needs
+    .filter(n => n.status === 'paid')
+    .filter(n => !mF || (n.month && n.month === mF))
+    .filter(n => !cF || cF === 'needs')
+    .map(n => ({
+      _isNeed: true,
+      id:      n.id,
+      type:    'expense',
+      category:'needs',
+      desc:    n.title,
+      amount:  n.price,
+      date:    n.paidDate || n.month || '',
+      bucket:  'needs',
+    }));
+
+  // Merge and sort by date desc
+  const all = [...txns, ...paidNeedRows].sort((a, b) => new Date(b.date) - new Date(a.date));
+
   const el = document.getElementById('history-table');
 
-  if (!txns.length) {
+  if (!all.length) {
     el.innerHTML = '<div class="empty-state"><div class="ei">📭</div><p>No transactions match</p></div>';
     return;
   }
@@ -480,22 +804,25 @@ function renderHistory() {
       </tr>
     </thead>
     <tbody>
-      ${txns.map(t => {
+      ${all.map(t => {
         const cat = t.type === 'income'
           ? { emoji: '💰', label: 'Income', color: 'var(--accent)' }
           : catInfo(t.category);
         const bucketMap = { needs: '🏠 Needs', wants: '🎉 Wants', savings: '💰 Savings' };
         const bucketLabel = t.bucket ? bucketMap[t.bucket] : '—';
+        const deleteBtn = t._isNeed
+          ? `<button class="delete-btn" onclick="deleteNeed('${t.id}')" title="Delete need">×</button>`
+          : `<button class="delete-btn" onclick="deleteEntry('${t.id}')">×</button>`;
         return `<tr>
-          <td style="font-family:'Roboto Mono',monospace;font-size:12px;color:var(--muted)">${t.date}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted)">${t.date}</td>
           <td style="font-weight:500">${t.desc}</td>
           <td><span class="badge" style="background:${cat.color}22;color:${cat.color}">${cat.emoji} ${cat.label}</span></td>
           <td style="font-size:12px;color:var(--muted)">${bucketLabel}</td>
           <td style="color:var(--muted);font-size:12px;text-transform:capitalize">${t.type}</td>
-          <td style="text-align:right;font-family:'Roboto Mono',monospace;color:${t.type === 'income' ? 'var(--accent)' : 'var(--text)'}">
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;color:${t.type === 'income' ? 'var(--accent)' : 'var(--text)'}">
             ${t.type === 'income' ? '+' : '-'}${fmt(t.amount)}
           </td>
-          <td><button class="delete-btn" onclick="deleteEntry('${t.id}')">×</button></td>
+          <td>${deleteBtn}</td>
         </tr>`;
       }).join('')}
     </tbody>
@@ -712,13 +1039,15 @@ async function bootApp() {
   document.documentElement.setAttribute('data-theme', savedTheme);
   updateThemeIcons();
 
-  selectBucket('needs');
+  selectBucket('wants');
 
   SCRIPT_URL = HARDCODED_SCRIPT_URL;
   showLoading('Loading your data…');
   try {
     const data = await api('getAll');
     STATE.transactions = (data.transactions || []).sort((a, b) => new Date(b.date) - new Date(a.date));
+    STATE.needs = data.needs || [];
+    STATE.needsHistory = (data.needsHistory || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     launchApp();
   } catch (e) {
     hideLoading();
