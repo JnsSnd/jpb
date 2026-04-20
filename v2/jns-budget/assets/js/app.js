@@ -48,15 +48,6 @@ function persist(){
 }
 let S=loadState();
 
-// Auto-inject Savings category for existing users who don't have it yet
-(function ensureSavingsCategory(){
-  const hasSavings=S.categories.some(c=>c.name.toLowerCase().includes('saving'));
-  if(!hasSavings){
-    S.categories.push({id:uid(),name:'Savings',color:'#3399FF',icon:'bi-piggy-bank'});
-    persist();
-  }
-})();
-
 // ════════════════════════════════
 //  HELPERS
 // ════════════════════════════════
@@ -280,23 +271,6 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
 });
 function closeTxModal(){document.getElementById('txModal').classList.remove('open')}
-function getWantsBudgetInfo(date,excludeTxId){
-  const d=new Date(date);
-  const year=d.getFullYear(),month=d.getMonth();
-  const txs=getMonthTxs(year,month);
-  const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
-  const w30=income*0.3;
-  const aW=S.wantsItems.filter(w=>w.active);
-  const wFixed=aW.reduce((a,w)=>a+w.amount,0);
-  const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
-  const wantsTxTotal=txs
-    .filter(t=>t.type==='expense'&&!savingsCatIds.includes(t.catId)&&t.id!==excludeTxId)
-    .reduce((a,t)=>a+t.amount,0);
-  const usedSoFar=wFixed+wantsTxTotal;
-  return{alloc:w30,used:usedSoFar,remaining:w30-usedSoFar};
-}
-
-let _pendingTxData=null;
 function saveTx(){
   const type=document.getElementById('txType').value;
   const amount=parseFloat(document.getElementById('txAmount').value);
@@ -304,33 +278,6 @@ function saveTx(){
   const catId=document.getElementById('txCat').value;
   const date=document.getElementById('txDate').value;
   if(!amount||isNaN(amount)||!desc||!date){toast('Please fill all fields','error');return;}
-
-  // Check wants budget warning only for non-savings expense transactions
-  if(type==='expense'){
-    const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
-    if(!savingsCatIds.includes(catId)){
-      const budget=getWantsBudgetInfo(date,editTxId||null);
-      if(budget.alloc>0&&amount>budget.remaining){
-        // Store pending data and show warning modal
-        _pendingTxData={type,amount,desc,catId,date};
-        const overBy=amount-(budget.remaining>0?budget.remaining:0);
-        document.getElementById('warnBudgetMsg').innerHTML=
-          `You are about to record an expense of <strong>${fmt(amount)}</strong> which exceeds your available Wants budget for this month.<br><br>`+
-          `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;font-size:13px">`+
-          `<div style="background:var(--surface2);border-radius:8px;padding:10px"><div style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Wants Budget</div><div style="font-weight:700;font-size:16px;color:var(--yellow)">${fmt(budget.alloc)}</div></div>`+
-          `<div style="background:var(--surface2);border-radius:8px;padding:10px"><div style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Remaining</div><div style="font-weight:700;font-size:16px;color:${budget.remaining<=0?'var(--red)':'var(--text)'}">${fmt(budget.remaining)}</div></div>`+
-          `</div>`+
-          `<div style="margin-top:14px;padding:10px 14px;background:var(--red-soft);border-radius:8px;font-size:13px;color:var(--red)"><i class="bi bi-exclamation-triangle-fill"></i> This transaction exceeds your remaining budget by <strong>${fmt(overBy)}</strong>.</div>`;
-        document.getElementById('warnBudgetModal').classList.add('open');
-        return;
-      }
-    }
-  }
-  commitSaveTx({type,amount,desc,catId,date});
-}
-
-function commitSaveTx(data){
-  const{type,amount,desc,catId,date}=data||_pendingTxData;
   if(editTxId){
     const i=S.transactions.findIndex(t=>t.id===editTxId);
     S.transactions[i]={...S.transactions[i],type,amount,desc,catId,date};
@@ -339,17 +286,7 @@ function commitSaveTx(data){
     S.transactions.push({id:uid(),type,amount,desc,catId,date});
     toast('Transaction added','success');
   }
-  _pendingTxData=null;
   persist();closeTxModal();renderTransactions();renderDashboard();
-}
-
-function closeWarnBudgetModal(){
-  document.getElementById('warnBudgetModal').classList.remove('open');
-  _pendingTxData=null;
-}
-function proceedAnyway(){
-  document.getElementById('warnBudgetModal').classList.remove('open');
-  commitSaveTx();
 }
 function deleteTx(id){
   if(!confirm('Delete this transaction?'))return;

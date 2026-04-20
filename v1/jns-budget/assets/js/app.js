@@ -12,7 +12,6 @@ function defaultCats(){return[
   {id:uid(),name:'Health',color:'#10B981',icon:'bi-heart-pulse'},
   {id:uid(),name:'Shopping',color:'#EC4899',icon:'bi-bag'},
   {id:uid(),name:'Salary',color:'#10B981',icon:'bi-briefcase'},
-  {id:uid(),name:'Savings',color:'#3399FF',icon:'bi-piggy-bank'},
   {id:uid(),name:'Others',color:'#94A3B8',icon:'bi-three-dots'},
 ]}
 function defaultNeeds(){return[
@@ -31,7 +30,6 @@ function loadState(){return{
   goals:DB.get('jns_goals')||[],
   needsItems:DB.get('jns_needs')||defaultNeeds(),
   wantsItems:DB.get('jns_wants')||defaultWants(),
-  needsPaid:DB.get('jns_needs_paid')||{},
   period:DB.get('jns_period')||{type:'monthly',startDay:1},
   currency:DB.get('jns_cur')||{symbol:'₱',format:'en'},
   dark:DB.get('jns_dark')||false,
@@ -39,7 +37,6 @@ function loadState(){return{
 function persist(){
   DB.set('jns_tx',S.transactions);DB.set('jns_cats',S.categories);DB.set('jns_goals',S.goals);
   DB.set('jns_needs',S.needsItems);DB.set('jns_wants',S.wantsItems);
-  DB.set('jns_needs_paid',S.needsPaid);
   DB.set('jns_period',S.period);DB.set('jns_cur',S.currency);DB.set('jns_dark',S.dark);
   // Auto-sync to Google Drive if enabled
   if(gdriveToken&&localStorage.getItem('jns_gdrive_autosync')==='1'){
@@ -47,15 +44,6 @@ function persist(){
   }
 }
 let S=loadState();
-
-// Auto-inject Savings category for existing users who don't have it yet
-(function ensureSavingsCategory(){
-  const hasSavings=S.categories.some(c=>c.name.toLowerCase().includes('saving'));
-  if(!hasSavings){
-    S.categories.push({id:uid(),name:'Savings',color:'#3399FF',icon:'bi-piggy-bank'});
-    persist();
-  }
-})();
 
 // ════════════════════════════════
 //  HELPERS
@@ -280,23 +268,6 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
 });
 function closeTxModal(){document.getElementById('txModal').classList.remove('open')}
-function getWantsBudgetInfo(date,excludeTxId){
-  const d=new Date(date);
-  const year=d.getFullYear(),month=d.getMonth();
-  const txs=getMonthTxs(year,month);
-  const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
-  const w30=income*0.3;
-  const aW=S.wantsItems.filter(w=>w.active);
-  const wFixed=aW.reduce((a,w)=>a+w.amount,0);
-  const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
-  const wantsTxTotal=txs
-    .filter(t=>t.type==='expense'&&!savingsCatIds.includes(t.catId)&&t.id!==excludeTxId)
-    .reduce((a,t)=>a+t.amount,0);
-  const usedSoFar=wFixed+wantsTxTotal;
-  return{alloc:w30,used:usedSoFar,remaining:w30-usedSoFar};
-}
-
-let _pendingTxData=null;
 function saveTx(){
   const type=document.getElementById('txType').value;
   const amount=parseFloat(document.getElementById('txAmount').value);
@@ -304,33 +275,6 @@ function saveTx(){
   const catId=document.getElementById('txCat').value;
   const date=document.getElementById('txDate').value;
   if(!amount||isNaN(amount)||!desc||!date){toast('Please fill all fields','error');return;}
-
-  // Check wants budget warning only for non-savings expense transactions
-  if(type==='expense'){
-    const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
-    if(!savingsCatIds.includes(catId)){
-      const budget=getWantsBudgetInfo(date,editTxId||null);
-      if(budget.alloc>0&&amount>budget.remaining){
-        // Store pending data and show warning modal
-        _pendingTxData={type,amount,desc,catId,date};
-        const overBy=amount-(budget.remaining>0?budget.remaining:0);
-        document.getElementById('warnBudgetMsg').innerHTML=
-          `You are about to record an expense of <strong>${fmt(amount)}</strong> which exceeds your available Wants budget for this month.<br><br>`+
-          `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;font-size:13px">`+
-          `<div style="background:var(--surface2);border-radius:8px;padding:10px"><div style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Wants Budget</div><div style="font-weight:700;font-size:16px;color:var(--yellow)">${fmt(budget.alloc)}</div></div>`+
-          `<div style="background:var(--surface2);border-radius:8px;padding:10px"><div style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Remaining</div><div style="font-weight:700;font-size:16px;color:${budget.remaining<=0?'var(--red)':'var(--text)'}">${fmt(budget.remaining)}</div></div>`+
-          `</div>`+
-          `<div style="margin-top:14px;padding:10px 14px;background:var(--red-soft);border-radius:8px;font-size:13px;color:var(--red)"><i class="bi bi-exclamation-triangle-fill"></i> This transaction exceeds your remaining budget by <strong>${fmt(overBy)}</strong>.</div>`;
-        document.getElementById('warnBudgetModal').classList.add('open');
-        return;
-      }
-    }
-  }
-  commitSaveTx({type,amount,desc,catId,date});
-}
-
-function commitSaveTx(data){
-  const{type,amount,desc,catId,date}=data||_pendingTxData;
   if(editTxId){
     const i=S.transactions.findIndex(t=>t.id===editTxId);
     S.transactions[i]={...S.transactions[i],type,amount,desc,catId,date};
@@ -339,17 +283,7 @@ function commitSaveTx(data){
     S.transactions.push({id:uid(),type,amount,desc,catId,date});
     toast('Transaction added','success');
   }
-  _pendingTxData=null;
   persist();closeTxModal();renderTransactions();renderDashboard();
-}
-
-function closeWarnBudgetModal(){
-  document.getElementById('warnBudgetModal').classList.remove('open');
-  _pendingTxData=null;
-}
-function proceedAnyway(){
-  document.getElementById('warnBudgetModal').classList.remove('open');
-  commitSaveTx();
 }
 function deleteTx(id){
   if(!confirm('Delete this transaction?'))return;
@@ -467,18 +401,6 @@ function initSplitSelects(){
   }
   document.getElementById('splitMonth').value=now.getMonth();
 }
-function getNeedsPaidKey(itemId,year,month){return`${itemId}_${year}_${month}`;}
-function toggleNeedsPaid(itemId){
-  const year=parseInt(document.getElementById('splitYear').value);
-  const month=parseInt(document.getElementById('splitMonth').value);
-  const key=getNeedsPaidKey(itemId,year,month);
-  S.needsPaid[key]=!S.needsPaid[key];
-  persist();renderSplit();
-}
-function isNeedsPaid(itemId,year,month){
-  return !!S.needsPaid[getNeedsPaidKey(itemId,year,month)];
-}
-
 function renderSplit(){
   const year=parseInt(document.getElementById('splitYear').value);
   const month=parseInt(document.getElementById('splitMonth').value);
@@ -486,113 +408,40 @@ function renderSplit(){
   const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
   document.getElementById('splitIncomeDisplay').textContent=fmt(income);
   const n50=income*0.5,w30=income*0.3,s20=income*0.2;
-
-  // Needs: only active items that are marked PAID this month
   const aN=S.needsItems.filter(n=>n.active);
-  const nPaidItems=aN.filter(n=>isNeedsPaid(n.id,year,month));
-  const nFixed=nPaidItems.reduce((a,n)=>a+n.amount,0);
-
-  // Wants: fixed wants items + expense transactions that are NOT in a Savings category
   const aW=S.wantsItems.filter(w=>w.active);
+  const nFixed=aN.reduce((a,n)=>a+n.amount,0);
   const wFixed=aW.reduce((a,w)=>a+w.amount,0);
-  const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
-  const expenseTxs=txs.filter(t=>t.type==='expense');
-  const wantsTxTotal=expenseTxs.filter(t=>!savingsCatIds.includes(t.catId)).reduce((a,t)=>a+t.amount,0);
-  const wTotal=wFixed+wantsTxTotal;
-
-  // Savings: expense transactions in Savings category
-  const savingsTxTotal=expenseTxs.filter(t=>savingsCatIds.includes(t.catId)).reduce((a,t)=>a+t.amount,0);
-
   document.getElementById('splitBuckets').innerHTML=
-    renderNeedsBucket(n50,aN,year,month)+
-    renderWantsBucket(w30,wTotal,wFixed,wantsTxTotal,aW)+
-    renderSavingsBucket(s20,savingsTxTotal);
-}
-
-function renderNeedsBucket(alloc,items,year,month){
-  const paidItems=items.filter(n=>isNeedsPaid(n.id,year,month));
-  const unpaidItems=items.filter(n=>!isNeedsPaid(n.id,year,month));
-  const paidTotal=paidItems.reduce((a,n)=>a+n.amount,0);
-  const rem=alloc-paidTotal;
-  const over=paidTotal>alloc;
-  const usedPct=alloc>0?Math.min(100,Math.round(paidTotal/alloc*100)):0;
-  const renderItem=n=>{
-    const paid=isNeedsPaid(n.id,year,month);
-    return`<div class="bucket-item-row" style="opacity:${paid?1:0.6}">
-      <span style="display:flex;align-items:center;gap:8px;flex:1">
-        <i class="bi bi-${paid?'check-circle-fill':'circle'}" style="color:${paid?'var(--green)':'var(--text3)'}"></i>
-        <span style="${paid?'text-decoration:line-through;color:var(--text3)':''}">${n.name}</span>
-        ${paid?'<span class="badge" style="background:var(--green-soft);color:var(--green);font-size:10px">Paid</span>':'<span class="badge" style="background:var(--yellow-soft);color:var(--yellow);font-size:10px">Unpaid</span>'}
-      </span>
-      <span style="display:flex;align-items:center;gap:8px">
-        <span style="font-weight:600;color:${paid?'var(--text3)':'var(--text)'}">${paid?'−':''} ${fmt(n.amount)}</span>
-        <button onclick="toggleNeedsPaid('${n.id}')" class="btn btn-sm" style="padding:3px 10px;font-size:11px;background:${paid?'var(--red-soft)':'var(--green-soft)'};color:${paid?'var(--red)':'var(--green)'};border:none;border-radius:6px;cursor:pointer">
-          ${paid?'Mark Unpaid':'Mark Paid'}
-        </button>
-      </span>
+    renderBucket('needs','Needs','50%',n50,nFixed,aN,'green')+
+    renderBucket('wants','Wants','30%',w30,wFixed,aW,'yellow')+
+    `<div class="bucket">
+      <div class="bucket-header">
+        <div class="bucket-info">
+          <div class="bucket-tag savings"><i class="bi bi-piggy-bank"></i> Savings — 20%</div>
+          <div class="bucket-amount savings">${fmt(s20)}</div>
+        </div>
+      </div>
+      <p class="text-sm">Set aside this amount each month as your savings target.</p>
     </div>`;
-  };
+}
+function renderBucket(type,label,pct,alloc,fixed,items,color){
+  const rem=alloc-fixed;
+  const usedPct=alloc>0?Math.min(100,Math.round(fixed/alloc*100)):0;
+  const over=fixed>alloc;
   return`<div class="bucket">
     <div class="bucket-header">
       <div class="bucket-info">
-        <div class="bucket-tag needs"><i class="bi bi-house"></i> Needs — 50%</div>
-        <div class="bucket-amount needs">${fmt(alloc)}</div>
+        <div class="bucket-tag ${type}"><i class="bi bi-${type==='needs'?'house':'stars'}"></i> ${label} — ${pct}</div>
+        <div class="bucket-amount ${type}">${fmt(alloc)}</div>
       </div>
       <div class="bucket-right">
-        <div class="deducted"><i class="bi bi-dash-circle-fill"></i> ${fmt(paidTotal)} deducted</div>
+        <div class="deducted"><i class="bi bi-dash-circle-fill"></i> ${fmt(fixed)} deducted</div>
         <div class="remaining">Remaining: <strong style="color:${over?'var(--red)':'var(--green)'}">${fmt(rem)}</strong></div>
       </div>
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:${usedPct}%;background:var(--${over?'red':'green'})"></div></div>
-    ${items.length?`<div class="bucket-items">${items.map(renderItem).join('')}</div>`:'<p class="text-sm" style="margin-top:10px">No fixed needs items. Add them in Settings.</p>'}
-    ${paidItems.length&&unpaidItems.length?`<div style="font-size:12px;color:var(--text3);margin-top:8px"><i class="bi bi-info-circle"></i> ${unpaidItems.length} unpaid item(s) not yet deducted</div>`:''}
-  </div>`;
-}
-
-function renderWantsBucket(alloc,wTotal,wFixed,wantsTxTotal,fixedItems){
-  const rem=alloc-wTotal;
-  const over=wTotal>alloc;
-  const usedPct=alloc>0?Math.min(100,Math.round(wTotal/alloc*100)):0;
-  return`<div class="bucket">
-    <div class="bucket-header">
-      <div class="bucket-info">
-        <div class="bucket-tag wants"><i class="bi bi-stars"></i> Wants — 30%</div>
-        <div class="bucket-amount wants">${fmt(alloc)}</div>
-      </div>
-      <div class="bucket-right">
-        <div class="deducted"><i class="bi bi-dash-circle-fill"></i> ${fmt(wTotal)} deducted</div>
-        <div class="remaining">Remaining: <strong style="color:${over?'var(--red)':'var(--green)'}">${fmt(rem)}</strong></div>
-      </div>
-    </div>
-    <div class="progress-bar"><div class="progress-fill" style="width:${usedPct}%;background:var(--${over?'red':'green'})"></div></div>
-    <div class="bucket-items">
-      ${fixedItems.map(i=>`<div class="bucket-item-row"><span><i class="bi bi-pin-angle" style="color:var(--text3)"></i> ${i.name}</span><span>− ${fmt(i.amount)}</span></div>`).join('')}
-      ${wantsTxTotal>0?`<div class="bucket-item-row"><span><i class="bi bi-arrow-left-right" style="color:var(--text3)"></i> Expense Transactions</span><span>− ${fmt(wantsTxTotal)}</span></div>`:''}
-      ${!fixedItems.length&&!wantsTxTotal?'<p class="text-sm" style="padding:8px 0">No wants spending this month.</p>':''}
-    </div>
-  </div>`;
-}
-
-function renderSavingsBucket(alloc,savingsTxTotal){
-  const rem=alloc-savingsTxTotal;
-  const over=savingsTxTotal>alloc;
-  const usedPct=alloc>0?Math.min(100,Math.round(savingsTxTotal/alloc*100)):0;
-  return`<div class="bucket">
-    <div class="bucket-header">
-      <div class="bucket-info">
-        <div class="bucket-tag savings"><i class="bi bi-piggy-bank"></i> Savings — 20%</div>
-        <div class="bucket-amount savings">${fmt(alloc)}</div>
-      </div>
-      <div class="bucket-right">
-        <div class="deducted"><i class="bi bi-dash-circle-fill"></i> ${fmt(savingsTxTotal)} saved</div>
-        <div class="remaining">Remaining target: <strong style="color:${over?'var(--accent)':'var(--green)'}">${fmt(Math.abs(rem))}</strong></div>
-      </div>
-    </div>
-    <div class="progress-bar"><div class="progress-fill" style="width:${usedPct}%;background:var(--accent)"></div></div>
-    <div class="bucket-items">
-      ${savingsTxTotal>0?`<div class="bucket-item-row"><span><i class="bi bi-piggy-bank" style="color:var(--accent)"></i> Savings Transactions</span><span style="color:var(--accent)">− ${fmt(savingsTxTotal)}</span></div>`:'<p class="text-sm" style="padding:8px 0">No savings transactions yet. Add a transaction with a Savings category.</p>'}
-    </div>
-    ${savingsTxTotal>=alloc?`<div style="font-size:12px;color:var(--green);margin-top:8px"><i class="bi bi-check-circle-fill"></i> Savings goal reached!</div>`:''}
+    ${items.length?`<div class="bucket-items">${items.map(i=>`<div class="bucket-item-row"><span><i class="bi bi-pin-angle" style="color:var(--text3)"></i> ${i.name}</span><span>− ${fmt(i.amount)}</span></div>`).join('')}</div>`:'<p class="text-sm" style="margin-top:10px">No fixed items. Add them in Settings.</p>'}
   </div>`;
 }
 
