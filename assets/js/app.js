@@ -63,6 +63,7 @@ let S=loadState();
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 function fmt(n){const sym=S.currency.symbol;const v=Number(n).toLocaleString(S.currency.format==='de'?'de-DE':'en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return sym+v}
 function getCat(id){return S.categories.find(c=>c.id===id)||{name:'Unknown',color:'#94A3B8',icon:'bi-question'}}
+function sortedCats(){return[...S.categories].sort((a,b)=>a.name.localeCompare(b.name))}
 function catIcon(cat,size=14){return`<i class="bi ${cat.icon}" style="color:${cat.color};font-size:${size}px"></i>`}
 
 function toast(msg,type='info'){
@@ -265,7 +266,7 @@ function openTxModal(id){
 }
 function populateTxCatSelect(type, selectedCatId){
   const sel=document.getElementById('txCat');
-  sel.innerHTML=S.categories.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
+  sel.innerHTML=sortedCats().map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
   if(selectedCatId){
     sel.value=selectedCatId;
   } else if(type==='income'){
@@ -290,7 +291,7 @@ function getWantsBudgetInfo(date,excludeTxId){
   const wFixed=aW.reduce((a,w)=>a+w.amount,0);
   const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
   const wantsTxTotal=txs
-    .filter(t=>t.type==='expense'&&!savingsCatIds.includes(t.catId)&&t.id!==excludeTxId)
+    .filter(t=>t.type==='expense'&&!savingsCatIds.includes(t.catId)&&t.id!==excludeTxId&&!t._needsKey)
     .reduce((a,t)=>a+t.amount,0);
   const usedSoFar=wFixed+wantsTxTotal;
   return{alloc:w30,used:usedSoFar,remaining:w30-usedSoFar};
@@ -358,7 +359,7 @@ function deleteTx(id){
 }
 function fillTxFilters(){
   const sel=document.getElementById('txFilterCat');
-  sel.innerHTML='<option value="">All Categories</option>'+S.categories.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
+  sel.innerHTML='<option value="">All Categories</option>'+sortedCats().map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
   // Year filter
   const yEl=document.getElementById('txFilterYear');
   const now=new Date();
@@ -440,7 +441,8 @@ function renderCalendar(){
     const hasExp=data&&data.expense.length>0;
     const incTotal=hasInc?data.income.reduce((a,t)=>a+t.amount,0):0;
     const expTotal=hasExp?data.expense.reduce((a,t)=>a+t.amount,0):0;
-    html+=`<div class="cal-day${isToday?' today':''}${hasInc||hasExp?' has-data':''}${hasInc?' has-income':''}${hasExp?' has-expense':''}" onclick="openTxModal()">
+    const dateStr=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    html+=`<div class="cal-day${isToday?' today':''}${hasInc||hasExp?' has-data':''}${hasInc?' has-income':''}${hasExp?' has-expense':''}" onclick="openCalDayModal('${dateStr}')">
       <div class="cal-date">${d}</div>
       ${hasInc?`<div class="cal-entry income"><i class="bi bi-arrow-down-short"></i>${fmt(incTotal)}</div>`:''}
       ${hasExp?`<div class="cal-entry expense"><i class="bi bi-arrow-up-short"></i>${fmt(expTotal)}</div>`:''}
@@ -452,6 +454,56 @@ function renderCalendar(){
   const totalExp=txs.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
   document.getElementById('calIncomeStat').textContent=fmt(totalInc);
   document.getElementById('calExpenseStat').textContent=fmt(totalExp);
+}
+
+function openCalDayModal(dateStr){
+  const dayTxs=S.transactions.filter(t=>t.date===dateStr).sort((a,b)=>a.type.localeCompare(b.type));
+  const d=new Date(dateStr+'T00:00:00');
+  const label=d.toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  const incTotal=dayTxs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
+  const expTotal=dayTxs.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
+
+  let rows='';
+  if(!dayTxs.length){
+    rows=`<div class="empty-state" style="padding:28px 0"><i class="bi bi-calendar-x" style="font-size:32px;color:var(--text3)"></i><p style="margin-top:8px;color:var(--text3)">No transactions on this day</p></div>`;
+  } else {
+    rows=dayTxs.map(t=>{
+      const cat=getCat(t.catId);
+      return`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+          ${catIcon(cat,14)}
+          <div style="min-width:0">
+            <div style="font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.desc}</div>
+            <div style="font-size:11.5px;color:var(--text3)">${cat.name}</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-left:12px">
+          <span style="font-size:13.5px;font-weight:600;color:${t.type==='income'?'var(--green)':'var(--red)'}">${t.type==='expense'?'-':'+'}${fmt(t.amount)}</span>
+          <button class="btn btn-icon btn-sm" onclick="closeCalDayModal();openTxModal('${t.id}')"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-icon btn-sm" onclick="calDeleteTx('${t.id}','${dateStr}')"><i class="bi bi-trash3"></i></button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  const summaryHtml=dayTxs.length?`
+    <div style="display:flex;gap:10px;margin-bottom:16px">
+      ${incTotal>0?`<div style="flex:1;background:var(--green-soft);border-radius:8px;padding:10px 14px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Income</div><div style="font-weight:700;color:var(--green)">${fmt(incTotal)}</div></div>`:''}
+      ${expTotal>0?`<div style="flex:1;background:var(--red-soft);border-radius:8px;padding:10px 14px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Expenses</div><div style="font-weight:700;color:var(--red)">${fmt(expTotal)}</div></div>`:''}
+    </div>`:'';
+
+  document.getElementById('calDayModalTitle').textContent=label;
+  document.getElementById('calDayModalBody').innerHTML=summaryHtml+rows;
+  document.getElementById('calDayAddBtn').onclick=()=>{closeCalDayModal();openTxModal();document.getElementById('txDate').value=dateStr;};
+  document.getElementById('calDayModal').classList.add('open');
+}
+function closeCalDayModal(){document.getElementById('calDayModal').classList.remove('open');}
+function calDeleteTx(id,dateStr){
+  if(!confirm('Delete this transaction?'))return;
+  S.transactions=S.transactions.filter(t=>t.id!==id);
+  persist();renderTransactions();renderDashboard();renderCalendar();
+  openCalDayModal(dateStr); // refresh the modal in place
+  toast('Deleted','success');
 }
 
 // ════════════════════════════════
@@ -472,8 +524,25 @@ function toggleNeedsPaid(itemId){
   const year=parseInt(document.getElementById('splitYear').value);
   const month=parseInt(document.getElementById('splitMonth').value);
   const key=getNeedsPaidKey(itemId,year,month);
-  S.needsPaid[key]=!S.needsPaid[key];
-  persist();renderSplit();
+  const nowPaid=!S.needsPaid[key];
+  S.needsPaid[key]=nowPaid;
+  const item=S.needsItems.find(n=>n.id===itemId);
+  if(item){
+    const txKey='jns_needs_tx_'+key;
+    if(nowPaid){
+      // Create an expense transaction dated today
+      const today=new Date().toISOString().slice(0,10);
+      const newTx={id:uid(),type:'expense',amount:item.amount,desc:item.name+' (Needs)',catId:item.catId||'',date:today,_needsKey:key};
+      S.transactions.push(newTx);
+      S.needsPaid[txKey]=newTx.id; // store the txId so we can delete it later
+    } else {
+      // Remove the auto-created transaction
+      const txId=S.needsPaid[txKey];
+      if(txId)S.transactions=S.transactions.filter(t=>t.id!==txId);
+      delete S.needsPaid[txKey];
+    }
+  }
+  persist();renderSplit();renderDashboard();
 }
 function isNeedsPaid(itemId,year,month){
   return !!S.needsPaid[getNeedsPaidKey(itemId,year,month)];
@@ -497,7 +566,7 @@ function renderSplit(){
   const wFixed=aW.reduce((a,w)=>a+w.amount,0);
   const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
   const expenseTxs=txs.filter(t=>t.type==='expense');
-  const wantsTxTotal=expenseTxs.filter(t=>!savingsCatIds.includes(t.catId)).reduce((a,t)=>a+t.amount,0);
+  const wantsTxTotal=expenseTxs.filter(t=>!savingsCatIds.includes(t.catId)&&!t._needsKey).reduce((a,t)=>a+t.amount,0);
   const wTotal=wFixed+wantsTxTotal;
 
   // Savings: expense transactions in Savings category
@@ -605,7 +674,7 @@ function openGoalModal(id){
   const g=id?S.goals.find(g=>g.id===id):null;
   document.getElementById('goalModalTitle').textContent=id?'Edit Goal':'Add Budget Goal';
   const sel=document.getElementById('goalCat');
-  sel.innerHTML=S.categories.map(c=>`<option value="${c.id}" ${g?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
+  sel.innerHTML=sortedCats().map(c=>`<option value="${c.id}" ${g?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
   document.getElementById('goalAmount').value=g?.limit||'';
   document.getElementById('goalModal').classList.add('open');
 }
@@ -812,7 +881,7 @@ function deleteCat(id){
   S.categories=S.categories.filter(c=>c.id!==id);persist();renderCatList();toast('Deleted','success');
 }
 function renderCatList(){
-  document.getElementById('catList').innerHTML=S.categories.map(c=>`
+  document.getElementById('catList').innerHTML=sortedCats().map(c=>`
     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
       <div class="gap-8"><i class="bi ${c.icon}" style="color:${c.color};font-size:16px"></i><span style="font-weight:500">${c.name}</span></div>
       <div class="gap-6">
@@ -831,7 +900,7 @@ function openNeedsModal(id){
   document.getElementById('needsName').value=item?.name||'';
   document.getElementById('needsAmount').value=item?.amount||'';
   const sel=document.getElementById('needsCat');
-  sel.innerHTML='<option value="">— No Category —</option>'+S.categories.map(c=>`<option value="${c.id}" ${item?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
+  sel.innerHTML='<option value="">— No Category —</option>'+sortedCats().map(c=>`<option value="${c.id}" ${item?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
   document.getElementById('needsModal').classList.add('open');
 }
 function closeNeedsModal(){document.getElementById('needsModal').classList.remove('open')}
@@ -882,7 +951,7 @@ function openWantsModal(id){
   document.getElementById('wantsName').value=item?.name||'';
   document.getElementById('wantsAmount').value=item?.amount||'';
   const sel=document.getElementById('wantsCat');
-  sel.innerHTML='<option value="">— No Category —</option>'+S.categories.map(c=>`<option value="${c.id}" ${item?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
+  sel.innerHTML='<option value="">— No Category —</option>'+sortedCats().map(c=>`<option value="${c.id}" ${item?.catId===c.id?'selected':''}>${c.name}</option>`).join('');
   document.getElementById('wantsModal').classList.add('open');
 }
 function closeWantsModal(){document.getElementById('wantsModal').classList.remove('open')}
