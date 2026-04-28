@@ -269,10 +269,9 @@ tbody tr:last-child{border-bottom:none;}
 
 /* ─── SEARCH BAR ─── */
 .search-bar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center;}
-.search-input{flex:1;min-width:160px;}
-.search-input .form-control{padding-left:36px;}
 .search-input-wrap{position:relative;flex:1;min-width:160px;}
-.search-input-wrap i{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px;}
+.search-input-wrap i{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px;pointer-events:none;z-index:1;}
+.search-input-wrap .form-control{padding-left:36px;}
 
 /* ─── CHART ─── */
 .chart-wrap{position:relative;height:240px;}

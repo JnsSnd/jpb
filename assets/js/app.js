@@ -35,12 +35,14 @@ function loadState(){return{
   period:DB.get('jns_period')||{type:'monthly',startDay:1},
   currency:DB.get('jns_cur')||{symbol:'₱',format:'en'},
   dark:DB.get('jns_dark')||false,
+  budgetRule:DB.get('jns_budget_rule')||{needs:50,wants:30,savings:20},
 }}
 function persist(){
   DB.set('jns_tx',S.transactions);DB.set('jns_cats',S.categories);DB.set('jns_goals',S.goals);
   DB.set('jns_needs',S.needsItems);DB.set('jns_wants',S.wantsItems);
   DB.set('jns_needs_paid',S.needsPaid);
   DB.set('jns_period',S.period);DB.set('jns_cur',S.currency);DB.set('jns_dark',S.dark);
+  DB.set('jns_budget_rule',S.budgetRule);
   // Auto-sync to Google Drive if enabled
   if(gdriveToken&&localStorage.getItem('jns_gdrive_autosync')==='1'){
     gdriveSyncNow();
@@ -133,7 +135,7 @@ function closeSidebar(){
 // ════════════════════════════════
 //  NAVIGATION
 // ════════════════════════════════
-const PAGE_TITLES={dashboard:'Dashboard',transactions:'Transactions',calendar:'Calendar',split:'50/30/20 Rule',goals:'Budget Goals',reports:'Reports',settings:'Settings'};
+const PAGE_TITLES={dashboard:'Dashboard',transactions:'Transactions',calendar:'Calendar',split:'Budget Rule',goals:'Budget Goals',reports:'Reports',settings:'Settings'};
 function navigate(page){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -286,7 +288,8 @@ function getWantsBudgetInfo(date,excludeTxId){
   const year=d.getFullYear(),month=d.getMonth();
   const txs=getMonthTxs(year,month);
   const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
-  const w30=income*0.3;
+  const br=S.budgetRule||{needs:50,wants:30,savings:20};
+  const w30=income*(br.wants/100);
   const aW=S.wantsItems.filter(w=>w.active);
   const wFixed=aW.reduce((a,w)=>a+w.amount,0);
   const savingsCatIds=S.categories.filter(c=>c.name.toLowerCase().includes('saving')).map(c=>c.id);
@@ -367,6 +370,12 @@ function fillTxFilters(){
   years.add(String(now.getFullYear()));
   const sortedYears=[...years].sort().reverse();
   yEl.innerHTML='<option value="">All Years</option>'+sortedYears.map(y=>`<option value="${y}" ${y===String(now.getFullYear())?'selected':''}>${y}</option>`).join('');
+  // Default month filter to current month (only on first load)
+  const mEl=document.getElementById('txFilterMonth');
+  if(mEl.dataset.initialized!=='1'){
+    mEl.value=String(now.getMonth());
+    mEl.dataset.initialized='1';
+  }
 }
 function renderTransactions(){
   const search=document.getElementById('txSearch').value.toLowerCase();
@@ -554,7 +563,9 @@ function renderSplit(){
   const txs=getMonthTxs(year,month);
   const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
   document.getElementById('splitIncomeDisplay').textContent=fmt(income);
-  const n50=income*0.5,w30=income*0.3,s20=income*0.2;
+  const br=S.budgetRule||{needs:50,wants:30,savings:20};
+  const nPct=br.needs/100,wPct=br.wants/100,sPct=br.savings/100;
+  const n50=income*nPct,w30=income*wPct,s20=income*sPct;
 
   // Needs: only active items that are marked PAID this month
   const aN=S.needsItems.filter(n=>n.active);
@@ -729,12 +740,15 @@ function renderGoals(){
 let trendInst=null,rPieInst=null;
 function initReportFilters(){
   const yEl=document.getElementById('reportFilterYear');
+  const now=new Date();
   if(yEl&&!yEl.options.length){
-    const now=new Date();
     const years=new Set(S.transactions.map(t=>t.date.slice(0,4)));
     years.add(String(now.getFullYear()));
     const sorted=[...years].sort().reverse();
-    yEl.innerHTML='<option value="">All Years</option>'+sorted.map(y=>`<option value="${y}">${y}</option>`).join('');
+    yEl.innerHTML='<option value="">All Years</option>'+sorted.map(y=>`<option value="${y}" ${y===String(now.getFullYear())?'selected':''}>${y}</option>`).join('');
+    // Default month to current month
+    const mEl=document.getElementById('reportFilterMonth');
+    if(mEl)mEl.value=String(now.getMonth());
   }
 }
 function getReportTxs(){
@@ -762,10 +776,14 @@ function renderReports(){
   // Trend — show last 12 months relative to filter or overall
   const filterYear=document.getElementById('reportFilterYear')?.value||'';
   const filterMonth=document.getElementById('reportFilterMonth')?.value??'';
+  const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
   let last12;
+  // Update chart title dynamically
+  const trendTitleEl=document.querySelector('#page-reports .grid-2 .card:first-child .card-label');
   if(filterYear&&filterMonth!==''){
     // Single month selected — show daily breakdown as bar chart
     const yr=parseInt(filterYear),mo=parseInt(filterMonth);
+    if(trendTitleEl)trendTitleEl.textContent=`Daily Breakdown — ${monthNames[mo]} ${yr}`;
     const days=new Date(yr,mo+1,0).getDate();
     last12=Array.from({length:days},(_,i)=>`${filterYear}-${String(mo+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`);
     const dayInc=last12.map(d=>allTxs.filter(t=>t.date===d&&t.type==='income').reduce((a,t)=>a+t.amount,0));
@@ -778,7 +796,21 @@ function renderReports(){
       ]},
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'var(--text2)',font:{family:'DM Sans',size:11}}}},scales:{x:{ticks:{color:'var(--text3)'},grid:{display:false}},y:{ticks:{color:'var(--text3)'},grid:{color:'var(--border)'}}}}
     });
+  } else if(filterYear){
+    if(trendTitleEl)trendTitleEl.textContent=`Monthly Trend — ${filterYear}`;
+    last12=getLast12();
+    const incD=last12.map(m=>months[m]?.income||0);
+    const expD=last12.map(m=>months[m]?.expense||0);
+    if(trendInst)trendInst.destroy();
+    trendInst=new Chart(document.getElementById('trendChart').getContext('2d'),{
+      type:'bar',data:{labels:last12.map(m=>m.slice(5)),datasets:[
+        {label:'Income',data:incD,backgroundColor:'rgba(16,185,129,0.7)',borderRadius:4},
+        {label:'Expense',data:expD,backgroundColor:'rgba(239,68,68,0.7)',borderRadius:4},
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'var(--text2)',font:{family:'DM Sans',size:11}}}},scales:{x:{ticks:{color:'var(--text3)'},grid:{display:false}},y:{ticks:{color:'var(--text3)'},grid:{color:'var(--border)'}}}}
+    });
   } else {
+    if(trendTitleEl)trendTitleEl.textContent='Monthly Trend (Last 12 Months)';
     last12=getLast12();
     const incD=last12.map(m=>months[m]?.income||0);
     const expD=last12.map(m=>months[m]?.expense||0);
@@ -828,6 +860,8 @@ function renderSettings(){
   document.getElementById('settingCurrency').value=S.currency.symbol||'₱';
   document.getElementById('settingNumFormat').value=S.currency.format||'en';
   renderPeriodOpts();renderCatList();renderNeedsList();renderWantsList();renderGdriveUI();
+  renderBudgetRulePanel();
+  updateNeedsWantsPanelDesc();
 }
 function savePeriod(){
   const type=document.getElementById('settingPeriod').value;
@@ -991,6 +1025,57 @@ function renderWantsList(){
       </div>
     </div>`;
   }).join('');
+}
+
+// ════════════════════════════════
+//  BUDGET RULE SETTINGS
+// ════════════════════════════════
+function renderBudgetRulePanel(){
+  const br=S.budgetRule||{needs:50,wants:30,savings:20};
+  document.getElementById('brNeeds').value=br.needs;
+  document.getElementById('brWants').value=br.wants;
+  document.getElementById('brSavings').value=br.savings;
+  validateBudgetRule();
+}
+function updateNeedsWantsPanelDesc(){
+  const br=S.budgetRule||{needs:50,wants:30,savings:20};
+  const nd=document.getElementById('needsPanelDesc');
+  const wd=document.getElementById('wantsPanelDesc');
+  if(nd)nd.textContent=`Auto-deducted from your ${br.needs}% Needs budget each month`;
+  if(wd)wd.textContent=`Auto-deducted from your ${br.wants}% Wants budget each month`;
+}
+function validateBudgetRule(){
+  const n=parseInt(document.getElementById('brNeeds').value)||0;
+  const w=parseInt(document.getElementById('brWants').value)||0;
+  const s=parseInt(document.getElementById('brSavings').value)||0;
+  const total=n+w+s;
+  const msgEl=document.getElementById('brValidationMsg');
+  const saveBtn=document.getElementById('brSaveBtn');
+  if(total===100){
+    msgEl.innerHTML=`<span style="color:var(--green)"><i class="bi bi-check-circle-fill"></i> Total: ${total}% — Ready to save</span>`;
+    if(saveBtn)saveBtn.disabled=false;
+  } else {
+    msgEl.innerHTML=`<span style="color:${total>100?'var(--red)':'var(--yellow)'}"><i class="bi bi-exclamation-triangle-fill"></i> Total: ${total}% — Must equal 100%</span>`;
+    if(saveBtn)saveBtn.disabled=true;
+  }
+}
+function onBudgetRuleInput(){validateBudgetRule();}
+function saveBudgetRule(){
+  const n=parseInt(document.getElementById('brNeeds').value)||0;
+  const w=parseInt(document.getElementById('brWants').value)||0;
+  const s=parseInt(document.getElementById('brSavings').value)||0;
+  if(n+w+s!==100){toast('Percentages must total 100%','error');return;}
+  S.budgetRule={needs:n,wants:w,savings:s};
+  persist();
+  updateNeedsWantsPanelDesc();
+  toast('Budget Rule saved','success');
+}
+function resetBudgetRule(){
+  S.budgetRule={needs:50,wants:30,savings:20};
+  persist();
+  renderBudgetRulePanel();
+  updateNeedsWantsPanelDesc();
+  toast('Reset to 50/30/20','success');
 }
 
 // ════════════════════════════════

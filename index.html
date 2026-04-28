@@ -43,7 +43,7 @@
       </div>
       <div class="nav-section-label">Planning</div>
       <div class="nav-item" onclick="navigate('split')">
-        <i class="bi bi-pie-chart nav-icon"></i><span class="nav-label">50/30/20 Rule</span>
+        <i class="bi bi-pie-chart nav-icon"></i><span class="nav-label">Budget Rule</span>
       </div>
       <div class="nav-item" onclick="navigate('goals')">
         <i class="bi bi-trophy nav-icon"></i><span class="nav-label">Budget Goals</span>
@@ -232,11 +232,11 @@
         </div>
       </div>
 
-      <!-- ═══ 50/30/20 ═══ -->
+      <!-- ═══ BUDGET RULE ═══ -->
       <div class="page" id="page-split">
         <div class="page-header">
           <div class="page-header-left">
-            <h2>50 / 30 / 20 Rule</h2>
+            <h2>Budget Rule</h2>
             <p>Auto-calculated from your transaction income</p>
           </div>
           <div class="page-header-right">
@@ -331,6 +331,7 @@
           <div class="stab active" onclick="stab('categories',this)"><i class="bi bi-tags"></i> Categories</div>
           <div class="stab" onclick="stab('needs',this)"><i class="bi bi-house"></i> Needs Items</div>
           <div class="stab" onclick="stab('wants',this)"><i class="bi bi-stars"></i> Wants Items</div>
+          <div class="stab" onclick="stab('budgetrule',this)"><i class="bi bi-pie-chart"></i> Budget Rule</div>
           <div class="stab" onclick="stab('period',this)"><i class="bi bi-calendar-range"></i> Period</div>
           <div class="stab" onclick="stab('currency',this)"><i class="bi bi-currency-exchange"></i> Currency</div>
           <div class="stab" onclick="stab('data',this)"><i class="bi bi-database"></i> Data</div>
@@ -350,7 +351,7 @@
         <div class="spanel" id="panel-needs">
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <div><span class="fw-600">Fixed Needs Items</span><div class="text-xs mt-4">Auto-deducted from your 50% Needs budget each month</div></div>
+              <div><span class="fw-600">Fixed Needs Items</span><div class="text-xs mt-4" id="needsPanelDesc">Auto-deducted from your 50% Needs budget each month</div></div>
               <button class="btn btn-primary btn-sm" onclick="openNeedsModal()"><i class="bi bi-plus-lg"></i> Add</button>
             </div>
             <div class="divider" style="margin:14px 0 0"></div>
@@ -361,11 +362,37 @@
         <div class="spanel" id="panel-wants">
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <div><span class="fw-600">Fixed Wants Items</span><div class="text-xs mt-4">Auto-deducted from your 30% Wants budget each month</div></div>
+              <div><span class="fw-600">Fixed Wants Items</span><div class="text-xs mt-4" id="wantsPanelDesc">Auto-deducted from your 30% Wants budget each month</div></div>
               <button class="btn btn-primary btn-sm" onclick="openWantsModal()"><i class="bi bi-plus-lg"></i> Add</button>
             </div>
             <div class="divider" style="margin:14px 0 0"></div>
             <div id="wantsList"></div>
+          </div>
+        </div>
+
+        <div class="spanel" id="panel-budgetrule">
+          <div class="card" style="max-width:480px">
+            <div class="card-label">Budget Rule Percentages</div>
+            <p style="font-size:13px;color:var(--text2);margin-bottom:18px;line-height:1.6">Customize your budget allocation percentages. Values must add up to 100%.</p>
+            <div class="form-row-3">
+              <div class="form-group">
+                <label class="form-label">Needs %</label>
+                <input class="form-control" type="number" id="brNeeds" min="0" max="100" placeholder="50" oninput="onBudgetRuleInput()"/>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Wants %</label>
+                <input class="form-control" type="number" id="brWants" min="0" max="100" placeholder="30" oninput="onBudgetRuleInput()"/>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Savings %</label>
+                <input class="form-control" type="number" id="brSavings" min="0" max="100" placeholder="20" oninput="onBudgetRuleInput()"/>
+              </div>
+            </div>
+            <div id="brValidationMsg" style="font-size:12.5px;margin-bottom:14px;min-height:20px;"></div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <button class="btn btn-primary" id="brSaveBtn" onclick="saveBudgetRule()">Save Budget Rule</button>
+              <button class="btn btn-ghost" onclick="resetBudgetRule()">Reset to 50/30/20</button>
+            </div>
           </div>
         </div>
 
