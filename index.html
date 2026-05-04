@@ -29,6 +29,10 @@
           <p>Smart Money Tracker</p>
         </div>
       </div>
+      <div class="sidebar-datetime" id="sidebarDatetime">
+        <div class="sidebar-date" id="sidebarDate"></div>
+        <div class="sidebar-time" id="sidebarTime"></div>
+      </div>
     </div>
     <nav class="nav-body">
       <div class="nav-section-label">Overview</div>
@@ -89,13 +93,14 @@
             <p id="dashPeriodLabel">Loading period...</p>
           </div>
           <div class="page-header-right">
+            <div id="cutoffBadgeWrap"></div>
             <select class="form-control" style="width:90px" id="dashFilterMode" onchange="onDashFilterModeChange()">
-              <option value="period">Period</option>
               <option value="month">Month</option>
+              <option value="cutoff">CutOff</option>
             </select>
-            <select class="form-control" style="width:90px" id="dashFilterYear" onchange="renderDashboard()" style="display:none">
+            <select class="form-control" style="width:90px" id="dashFilterYear" onchange="_recentPage=0;renderDashboard()" style="display:none">
             </select>
-            <select class="form-control" style="width:130px" id="dashFilterMonth" onchange="renderDashboard()" style="display:none">
+            <select class="form-control" style="width:130px" id="dashFilterMonth" onchange="_recentPage=0;renderDashboard()" style="display:none">
               <option value="0">January</option><option value="1">February</option>
               <option value="2">March</option><option value="3">April</option>
               <option value="4">May</option><option value="5">June</option>
@@ -103,32 +108,53 @@
               <option value="8">September</option><option value="9">October</option>
               <option value="10">November</option><option value="11">December</option>
             </select>
+            <select class="form-control" style="width:180px;display:none" id="dashFilterCutoff" onchange="_recentPage=0;renderDashboard()"></select>
           </div>
         </div>
         <div class="grid-4">
           <div class="card">
             <div class="stat-icon green"><i class="bi bi-arrow-down-circle"></i></div>
-            <div class="card-label">Total Income</div>
+            <div class="card-label">Total Income <span class="info-icon" data-tip="All income transactions recorded in the selected period."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="stat-number green" id="dashIncome">₱0.00</div>
             <div class="stat-sub">This period</div>
           </div>
           <div class="card">
             <div class="stat-icon red"><i class="bi bi-arrow-up-circle"></i></div>
-            <div class="card-label">Total Expenses</div>
+            <div class="card-label">Total Expenses <span class="info-icon" data-tip="Sum of all expense transactions in the selected period."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="stat-number red" id="dashExpense">₱0.00</div>
             <div class="stat-sub">This period</div>
           </div>
           <div class="card">
             <div class="stat-icon blue"><i class="bi bi-wallet2"></i></div>
-            <div class="card-label">Net Balance</div>
+            <div class="card-label">Net Balance <span class="info-icon" data-tip="Your remaining money after subtracting all expenses from income. Positive means you're saving; negative means you overspent."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="stat-number blue" id="dashBalance">₱0.00</div>
             <div class="stat-sub">Income − Expenses</div>
           </div>
           <div class="card">
             <div class="stat-icon yellow"><i class="bi bi-receipt"></i></div>
-            <div class="card-label">Transactions</div>
+            <div class="card-label">Transactions <span class="info-icon" data-tip="Total number of income and expense entries recorded in the selected period."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="stat-number" id="dashTxCount">0</div>
             <div class="stat-sub">This period</div>
+          </div>
+        </div>
+        <div id="cutoffProjectionCard" style="display:none">
+          <div class="grid-2 cutoff-grid">
+            <div class="card cutoff-projection-card">
+              <div class="card-label">
+                <i class="bi bi-graph-down-arrow" style="color:var(--accent)"></i>
+                Balance Projection
+                <span class="info-icon" data-tip="Estimates your spending by end of the cutoff period based on your current daily burn rate. Shows whether you're on track to stay within your income."><i class="bi bi-info-circle-fill"></i></span>
+              </div>
+              <div id="projectionBody"></div>
+            </div>
+            <div class="card cutoff-projection-card">
+              <div class="card-label">
+                <i class="bi bi-calendar2-check" style="color:var(--accent)"></i>
+                This CutOff Period
+                <span class="info-icon" data-tip="Summary of income and expenses for the current salary cutoff period — from the last cutoff day to the next one."><i class="bi bi-info-circle-fill"></i></span>
+              </div>
+              <div id="cutoffPeriodSummary"></div>
+            </div>
           </div>
         </div>
         <div class="grid-2">
@@ -137,7 +163,7 @@
             <div class="chart-wrap"><canvas id="catPieChart"></canvas></div>
           </div>
           <div class="card">
-            <div class="card-label">Recent Transactions</div>
+            <div class="card-label" id="recentTxLabel">Recent Transactions</div>
             <div id="recentTxList"></div>
           </div>
         </div>
@@ -155,6 +181,10 @@
             <p>All your income and expense records</p>
           </div>
           <div class="page-header-right">
+            <select class="form-control" style="width:100px" id="txFilterMode" onchange="onTxFilterModeChange()">
+              <option value="month">Month</option>
+              <option value="cutoff">CutOff</option>
+            </select>
             <select class="form-control" style="width:90px" id="txFilterYear" onchange="renderTransactions()"></select>
             <select class="form-control" style="width:130px" id="txFilterMonth" onchange="renderTransactions()">
               <option value="">All Months</option>
@@ -165,6 +195,17 @@
               <option value="8">September</option><option value="9">October</option>
               <option value="10">November</option><option value="11">December</option>
             </select>
+            <!-- CutOff mode: year + month selectors to pick which month's 2 periods to show -->
+            <select class="form-control" style="width:80px;display:none" id="txFilterCutoffYear" onchange="onTxCutoffMonthChange()"></select>
+            <select class="form-control" style="width:130px;display:none" id="txFilterCutoffMonth" onchange="onTxCutoffMonthChange()">
+              <option value="0">January</option><option value="1">February</option>
+              <option value="2">March</option><option value="3">April</option>
+              <option value="4">May</option><option value="5">June</option>
+              <option value="6">July</option><option value="7">August</option>
+              <option value="8">September</option><option value="9">October</option>
+              <option value="10">November</option><option value="11">December</option>
+            </select>
+            <select class="form-control" style="width:190px;display:none" id="txFilterCutoff" onchange="renderTransactions()"></select>
           </div>
         </div>
         <div class="search-bar">
@@ -300,16 +341,21 @@
         </div>
         <div class="grid-2">
           <div class="card">
-            <div class="card-label">Monthly Trend (Last 12 Months)</div>
+            <div class="card-label">Monthly Trend (Last 12 Months) <span class="info-icon" data-tip="Bar chart showing your income vs expenses for each month over the past year. Helps you spot patterns in your spending over time."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
           </div>
           <div class="card">
-            <div class="card-label">Expense Breakdown (All Time)</div>
+            <div class="card-label">Expense Breakdown (All Time) <span class="info-icon" data-tip="Donut chart showing what percentage of your total expenses went to each category. Useful for identifying your biggest spending areas."><i class="bi bi-info-circle-fill"></i></span></div>
             <div class="chart-wrap"><canvas id="reportPieChart"></canvas></div>
           </div>
         </div>
+        <div class="card" id="cutoffCompareCard" style="display:none">
+          <div class="card-label"><i class="bi bi-scissors" style="color:var(--accent)"></i> CutOff vs CutOff Comparison <span class="info-icon" data-tip="Compares your income and expenses across your last 8 salary cutoff periods. Helps you see if your spending habits are improving or worsening each cycle."><i class="bi bi-info-circle-fill"></i></span></div>
+          <div class="chart-wrap" style="height:220px"><canvas id="cutoffCompareChart"></canvas></div>
+          <div id="cutoffCompareTable" style="margin-top:16px"></div>
+        </div>
         <div class="card">
-          <div class="card-label">Monthly Summary</div>
+          <div class="card-label">Monthly Summary <span class="info-icon" data-tip="A table listing total income, expenses, and net balance for each month. Sorted newest first."><i class="bi bi-info-circle-fill"></i></span></div>
           <div class="table-wrap">
             <table>
               <thead><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Net</th></tr></thead>
@@ -334,6 +380,8 @@
           <div class="stab" onclick="stab('budgetrule',this)"><i class="bi bi-pie-chart"></i> Budget Rule</div>
           <div class="stab" onclick="stab('period',this)"><i class="bi bi-calendar-range"></i> Period</div>
           <div class="stab" onclick="stab('currency',this)"><i class="bi bi-currency-exchange"></i> Currency</div>
+          <div class="stab" onclick="stab('cutoff',this)"><i class="bi bi-scissors"></i> CutOff</div>
+          <div class="stab" onclick="stab('rollover',this)"><i class="bi bi-arrow-repeat"></i> Rollover</div>
           <div class="stab" onclick="stab('data',this)"><i class="bi bi-database"></i> Data</div>
           <div class="stab" onclick="stab('cloudsync',this)"><i class="bi bi-cloud-arrow-up"></i> Cloud Sync</div>
         </div>
@@ -434,6 +482,71 @@
               </select>
             </div>
             <button class="btn btn-primary" onclick="saveCurrency()">Save Currency</button>
+          </div>
+        </div>
+
+        <div class="spanel" id="panel-cutoff">
+          <div class="card" style="max-width:500px">
+            <div class="card-label">CutOff Schedule</div>
+            <p style="font-size:13px;color:var(--text2);margin-bottom:18px;line-height:1.6">Enable cutoff periods to track your income and expenses per salary cycle. Each cutoff period runs from one cutoff day to the next.</p>
+            <div class="toggle-row" style="margin-bottom:18px">
+              <div class="toggle-info">
+                <h4>Enable CutOff Tracking</h4>
+                <p>Group transactions and income by salary cutoff periods instead of calendar months</p>
+              </div>
+              <label class="toggle"><input type="checkbox" id="cutoffEnabled" onchange="onCutoffToggle(this.checked)"/><span class="tslider"></span></label>
+            </div>
+            <div id="cutoffDaysConfig" style="display:none">
+              <div class="divider" style="margin-bottom:18px"></div>
+              <div class="card-label" style="margin-bottom:10px">Cutoff Days</div>
+              <p style="font-size:12.5px;color:var(--text2);margin-bottom:14px">Enter the day-of-month numbers when your salary is released. You can add up to 4 cutoff days.</p>
+              <div id="cutoffDaysList" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px"></div>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:18px">
+                <input class="form-control" type="number" id="cutoffDayInput" min="1" max="28" placeholder="Day (1-28)" style="width:150px"/>
+                <button class="btn btn-primary btn-sm" onclick="addCutoffDay()"><i class="bi bi-plus-lg"></i> Add Day</button>
+              </div>
+              <div class="divider" style="margin-bottom:18px"></div>
+              <button class="btn btn-primary" onclick="saveCutoff()"><i class="bi bi-check-lg"></i> Save CutOff Settings</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="spanel" id="panel-rollover">
+          <div class="card" style="max-width:500px">
+            <div class="card-label"><i class="bi bi-arrow-repeat" style="color:var(--accent)"></i> Rollover Balance</div>
+            <p style="font-size:13px;color:var(--text2);margin-bottom:18px;line-height:1.6">When a cutoff period ends with unspent balance, you can carry it over as income into the next period. The rollover prompt appears automatically on cutoff days.</p>
+            <div class="toggle-row" style="margin-bottom:18px">
+              <div class="toggle-info">
+                <h4>Auto-detect rollover on startup</h4>
+                <p>Shows a carry-over prompt when a cutoff period has just ended with remaining balance</p>
+              </div>
+              <label class="toggle"><input type="checkbox" id="rolloverAutoCheck" onchange="saveRolloverSetting(this.checked)" checked/><span class="tslider"></span></label>
+            </div>
+            <div class="divider" style="margin-bottom:18px"></div>
+            <div class="card-label" style="margin-bottom:10px;font-size:13px">Manual Rollover</div>
+            <p style="font-size:12.5px;color:var(--text2);margin-bottom:14px">Manually trigger a rollover check for the previous cutoff period.</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+              <button class="btn btn-primary" onclick="checkCutoffRollover()"><i class="bi bi-arrow-repeat"></i> Check for Rollover Now</button>
+            </div>
+            <div class="divider" style="margin-bottom:18px"></div>
+            <div class="card-label" style="margin-bottom:10px;font-size:13px;color:var(--yellow)"><i class="bi bi-clock-history"></i> Test Date Override</div>
+            <p style="font-size:12.5px;color:var(--text2);margin-bottom:12px">Set a custom date/time to test rollover and cutoff features. The clock in the sidebar turns <strong style="color:var(--yellow)">yellow</strong> when override is active.</p>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+              <input class="form-control" type="datetime-local" id="testDateInput" style="width:220px"/>
+              <button class="btn btn-ghost btn-sm" onclick="applyTestDate()"><i class="bi bi-play-fill"></i> Set Test Date</button>
+              <button class="btn btn-danger btn-sm" onclick="clearTestDate()"><i class="bi bi-x-circle"></i> Clear</button>
+            </div>
+            <div id="testDateStatus" style="font-size:12px;color:var(--text3);min-height:18px"></div>
+            <div class="divider" style="margin:18px 0"></div>
+            <div class="card-label" style="margin-bottom:10px;font-size:13px;color:var(--red)"><i class="bi bi-flag"></i> Testing — Reset Rollover Flags</div>
+            <p style="font-size:12.5px;color:var(--text2);margin-bottom:14px;line-height:1.6">
+              Clears the saved "already confirmed / dismissed" flags for rollover periods so the modal can appear again. Use this when testing — it does <strong>not</strong> delete any transactions.
+            </p>
+            <div id="rolloverFlagsList" style="margin-bottom:14px;font-size:12.5px;color:var(--text3);min-height:18px"></div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <button class="btn btn-danger btn-sm" onclick="resetRolloverFlags()"><i class="bi bi-trash3"></i> Clear All Rollover Flags</button>
+              <button class="btn btn-ghost btn-sm" onclick="renderRolloverFlagsList()"><i class="bi bi-arrow-clockwise"></i> Refresh List</button>
+            </div>
           </div>
         </div>
 
@@ -664,6 +777,26 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeCalDayModal()">Close</button>
       <button class="btn btn-primary" id="calDayAddBtn"><i class="bi bi-plus-lg"></i> Add Transaction</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ROLLOVER CONFIRMATION MODAL ═══ -->
+<div class="modal-overlay" id="rolloverModal">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <h3 style="display:flex;align-items:center;gap:9px">
+        <span style="width:32px;height:32px;background:var(--accent-soft);border-radius:8px;display:flex;align-items:center;justify-content:center">
+          <i class="bi bi-arrow-repeat" style="color:var(--accent);font-size:15px"></i>
+        </span>
+        CutOff Period Ended
+      </h3>
+      <button class="modal-close" onclick="closeRolloverModal()"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <div id="rolloverModalBody" style="font-size:13.5px;color:var(--text2);line-height:1.7;margin-bottom:4px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeRolloverModal()"><i class="bi bi-x"></i> Dismiss</button>
+      <button class="btn btn-primary" onclick="confirmRollover()"><i class="bi bi-arrow-repeat"></i> Carry Over Balance</button>
     </div>
   </div>
 </div>

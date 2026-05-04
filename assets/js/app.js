@@ -3,6 +3,10 @@
 // ════════════════════════════════
 const DB={get:k=>{try{return JSON.parse(localStorage.getItem(k))}catch{return null}},set:(k,v)=>localStorage.setItem(k,JSON.stringify(v))};
 let gdriveToken=null; // declared early so persist() can reference it
+let _testDateOffset=null; // declared early so getNow() can reference it
+
+// uid must be defined before defaultCats/Needs/Wants which call it at parse time
+function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 
 function defaultCats(){return[
   {id:uid(),name:'Food & Dining',color:'#FF6B6B',icon:'bi-cup-hot'},
@@ -36,6 +40,7 @@ function loadState(){return{
   currency:DB.get('jns_cur')||{symbol:'₱',format:'en'},
   dark:DB.get('jns_dark')||false,
   budgetRule:DB.get('jns_budget_rule')||{needs:50,wants:30,savings:20},
+  cutoff:DB.get('jns_cutoff')||{enabled:false,days:[]},
 }}
 function persist(){
   DB.set('jns_tx',S.transactions);DB.set('jns_cats',S.categories);DB.set('jns_goals',S.goals);
@@ -43,6 +48,7 @@ function persist(){
   DB.set('jns_needs_paid',S.needsPaid);
   DB.set('jns_period',S.period);DB.set('jns_cur',S.currency);DB.set('jns_dark',S.dark);
   DB.set('jns_budget_rule',S.budgetRule);
+  DB.set('jns_cutoff',S.cutoff);
   // Auto-sync to Google Drive if enabled
   if(gdriveToken&&localStorage.getItem('jns_gdrive_autosync')==='1'){
     gdriveSyncNow();
@@ -59,10 +65,18 @@ let S=loadState();
   }
 })();
 
+// Auto-inject Rollover category for cutoff users
+(function ensureRolloverCategory(){
+  const has=S.categories.some(c=>c._isRollover);
+  if(!has&&S.cutoff?.enabled){
+    S.categories.push({id:uid(),name:'Budget Rollover',color:'#8B5CF6',icon:'bi-arrow-repeat',_isRollover:true});
+    persist();
+  }
+})();
+
 // ════════════════════════════════
 //  HELPERS
 // ════════════════════════════════
-function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 function fmt(n){const sym=S.currency.symbol;const v=Number(n).toLocaleString(S.currency.format==='de'?'de-DE':'en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return sym+v}
 function getCat(id){return S.categories.find(c=>c.id===id)||{name:'Unknown',color:'#94A3B8',icon:'bi-question'}}
 function sortedCats(){return[...S.categories].sort((a,b)=>a.name.localeCompare(b.name))}
@@ -75,7 +89,7 @@ function toast(msg,type='info'){
 }
 
 function getPeriodTxs(){
-  const now=new Date(),p=S.period;
+  const now=getNow(),p=S.period;
   return S.transactions.filter(tx=>{
     const d=new Date(tx.date);
     if(p.type==='monthly'){
@@ -107,6 +121,300 @@ function getPeriodLabel(){
 }
 
 // ════════════════════════════════
+//  CUTOFF HELPERS
+// ════════════════════════════════
+// Returns sorted unique cutoff days (numbers)
+function getCutoffDays(){
+  return (S.cutoff?.days||[]).slice().sort((a,b)=>a-b);
+}
+
+// Given a date, returns {start, end} of the cutoff period it belongs to
+// Period boundaries: cutoff day is the START of the new period (payday inclusive)
+// e.g. cutoffs [5, 20]:
+//   Period A: 20th (prev) → 4th (this month)   [20th=payday, ends day before next cutoff]
+//   Period B: 5th (this)  → 19th (this month)
+//   Period C: 20th (this) → 4th (next month)
+function getCutoffPeriodFor(date){
+  const d=new Date(date+'T00:00:00');
+  const day=d.getDate(),year=d.getFullYear(),month=d.getMonth();
+  const days=getCutoffDays();
+  if(!days.length)return null;
+
+  let periodStart, periodEnd;
+
+  // Find the most recent cutoff day <= today (that's our period start)
+  const startIdx=[...days].reverse().findIndex(cd=>cd<=day);
+  if(startIdx===-1){
+    // day is before the first cutoff day of the month
+    // period started on the last cutoff day of the PREVIOUS month
+    const lastDay=days[days.length-1];
+    periodStart=new Date(year,month-1,lastDay);
+    // ends the day before the first cutoff of this month
+    periodEnd=new Date(year,month,days[0]-1);
+  } else {
+    const revIdx=days.length-1-startIdx;
+    const cutStart=days[revIdx];
+    periodStart=new Date(year,month,cutStart);
+    // end is the day before the next cutoff day
+    if(revIdx+1<days.length){
+      periodEnd=new Date(year,month,days[revIdx+1]-1);
+    } else {
+      // next cutoff is first day of next month's cutoffs
+      periodEnd=new Date(year,month+1,days[0]-1);
+    }
+  }
+
+  return{start:periodStart,end:periodEnd};
+}
+
+// Returns all distinct cutoff periods that have transactions, ordered newest first
+function getAllCutoffPeriods(){
+  const days=getCutoffDays();
+  if(!days.length)return[];
+  const seen=new Set();
+  const periods=[];
+  S.transactions.forEach(tx=>{
+    const p=getCutoffPeriodFor(tx.date);
+    if(!p)return;
+    const key=p.start.toISOString().slice(0,10)+'|'+p.end.toISOString().slice(0,10);
+    if(!seen.has(key)){seen.add(key);periods.push(p);}
+  });
+  // Also include current period even if no txs yet
+  const now=getNow();
+  const curP=getCutoffPeriodFor(now.toISOString().slice(0,10));
+  if(curP){
+    const key=curP.start.toISOString().slice(0,10)+'|'+curP.end.toISOString().slice(0,10);
+    if(!seen.has(key)){seen.add(key);periods.push(curP);}
+  }
+  return periods.sort((a,b)=>b.start-a.start);
+}
+
+function getCutoffPeriodTxs(period){
+  return S.transactions.filter(tx=>{
+    const d=new Date(tx.date+'T00:00:00');
+    return d>=period.start&&d<=period.end;
+  });
+}
+
+function fmtCutoffPeriod(period){
+  const opts={month:'short',day:'numeric'};
+  return period.start.toLocaleDateString('en-US',opts)+' – '+period.end.toLocaleDateString('en-US',{...opts,year:'numeric'});
+}
+
+// Returns the next cutoff date from today
+function getNextCutoffDate(){
+  const days=getCutoffDays();
+  if(!days.length)return null;
+  const now=getNow();
+  const today=now.getDate(),month=now.getMonth(),year=now.getFullYear();
+  // Find next cutoff day >= today+1
+  for(const d of days){
+    if(d>today)return new Date(year,month,d);
+  }
+  // Next month's first cutoff day
+  return new Date(year,month+1,days[0]);
+}
+
+function getDaysUntilNextCutoff(){
+  const next=getNextCutoffDate();
+  if(!next)return null;
+  const now=getNow();now.setHours(0,0,0,0);
+  return Math.round((next-now)/(1000*60*60*24));
+}
+
+// Build cutoff select options for a <select> element
+function buildCutoffOptions(selectId,selectedKey){
+  const periods=getAllCutoffPeriods();
+  const el=document.getElementById(selectId);
+  if(!el)return;
+  el.innerHTML=periods.map(p=>{
+    const key=p.start.toISOString().slice(0,10)+'|'+p.end.toISOString().slice(0,10);
+    return`<option value="${key}" ${key===selectedKey?'selected':''}>${fmtCutoffPeriod(p)}</option>`;
+  }).join('');
+  // Default to current period
+  if(!selectedKey){
+    const now=getNow();
+    const curP=getCutoffPeriodFor(now.toISOString().slice(0,10));
+    if(curP){
+      const key=curP.start.toISOString().slice(0,10)+'|'+curP.end.toISOString().slice(0,10);
+      el.value=key;
+    }
+  }
+}
+
+// Build cutoff options showing only the 2 periods that fall within a specific month
+// e.g. cutoffs [5,20], month=April -> "Apr 21-May 5" era period and "Apr 6-Apr 20" period
+function buildCutoffOptionsForMonth(selectId, year, month, selectedKey){
+  const days=getCutoffDays();
+  const el=document.getElementById(selectId);
+  if(!el||!days.length)return;
+
+  // For a month with 2 cutoff days [d1, d2], there are exactly 2 periods whose END date falls in this month:
+  // Period A: (prev_d2 + 1) of prev month  ->  d1 of this month
+  // Period B: (d1 + 1) of this month        ->  d2 of this month
+  // We use the end-date to anchor periods to a month, so users filter by "which month do I want to see"
+  const periods=[];
+  days.forEach(cutDay=>{
+    // This cutoff day ends a period. Compute that period's start.
+    const endDate=new Date(year,month,cutDay);
+    const p=getCutoffPeriodFor(endDate.toISOString().slice(0,10));
+    if(p){
+      const key=p.start.toISOString().slice(0,10)+'|'+p.end.toISOString().slice(0,10);
+      // Avoid duplicates
+      if(!periods.find(x=>x.key===key)) periods.push({key,p});
+    }
+  });
+
+  // Sort chronologically
+  periods.sort((a,b)=>a.p.start-b.p.start);
+
+  el.innerHTML=periods.map(({key,p})=>{
+    return`<option value="${key}" ${key===selectedKey?'selected':''}>${fmtCutoffPeriod(p)}</option>`;
+  }).join('');
+
+  // Auto-select: prefer current period if it belongs to this month, else first option
+  if(!selectedKey||!periods.find(x=>x.key===selectedKey)){
+    const now=getNow();
+    const curP=getCutoffPeriodFor(now.toISOString().slice(0,10));
+    if(curP){
+      const curKey=curP.start.toISOString().slice(0,10)+'|'+curP.end.toISOString().slice(0,10);
+      const match=periods.find(x=>x.key===curKey);
+      el.value=match?curKey:periods[0]?.key||'';
+    } else {
+      el.value=periods[0]?.key||'';
+    }
+  }
+}
+
+function parseCutoffKey(key){
+  if(!key||!key.includes('|'))return null;
+  const [s,e]=key.split('|');
+  return{start:new Date(s+'T00:00:00'),end:new Date(e+'T00:00:00')};
+}
+
+// Render the "Next Cutoff" badge on dashboard
+function renderCutoffBadge(){
+  const wrap=document.getElementById('cutoffBadgeWrap');
+  if(!wrap)return;
+  if(!S.cutoff?.enabled||!getCutoffDays().length){wrap.innerHTML='';return;}
+  const daysLeft=getDaysUntilNextCutoff();
+  const next=getNextCutoffDate();
+  if(daysLeft===null){wrap.innerHTML='';return;}
+  const color=daysLeft<=2?'var(--red)':daysLeft<=5?'var(--yellow)':'var(--accent)';
+  const label=daysLeft===0?'Today!':daysLeft===1?'Tomorrow':daysLeft+' days';
+  wrap.innerHTML=`<div class="cutoff-badge" style="border-color:${color};color:${color}">
+    <i class="bi bi-scissors"></i>
+    <span>Next CutOff: <strong>${label}</strong></span>
+    <span style="font-size:10px;opacity:.7">${next.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>
+  </div>`;
+}
+
+// Render balance projection card
+function renderProjectionCard(txs){
+  const projCard=document.getElementById('cutoffProjectionCard');
+  const projBody=document.getElementById('projectionBody');
+  const periodSummary=document.getElementById('cutoffPeriodSummary');
+  if(!projCard)return;
+
+  const mode=document.getElementById('dashFilterMode')?.value||'period';
+  const cutoffEnabled=S.cutoff?.enabled&&getCutoffDays().length>0;
+
+  if(mode!=='cutoff'||!cutoffEnabled){projCard.style.display='none';return;}
+  projCard.style.display='';
+
+  // Use the SELECTED period from the dropdown (not always current period)
+  const selectedKey=document.getElementById('dashFilterCutoff')?.value||'';
+  const selectedPeriod=parseCutoffKey(selectedKey);
+  const now=getNow();now.setHours(0,0,0,0);
+  const curPeriod=getCutoffPeriodFor(now.toISOString().slice(0,10));
+  const displayPeriod=selectedPeriod||curPeriod;
+  if(!displayPeriod){projCard.style.display='none';return;}
+
+  // Is this the current ongoing period?
+  const isCurrentPeriod=!selectedPeriod||(
+    curPeriod&&
+    displayPeriod.start.getTime()===curPeriod.start.getTime()&&
+    displayPeriod.end.getTime()===curPeriod.end.getTime()
+  );
+
+  // Use txs already filtered for this period (passed in from renderDashboard)
+  const income=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
+  const spent=txs.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
+  const balance=income-spent;
+
+  const start=displayPeriod.start;
+  const end=displayPeriod.end;
+  const totalDays=Math.max(1,Math.round((end-start)/(1000*60*60*24))+1);
+  const effectiveNow=isCurrentPeriod?now:end;
+  const daysElapsed=Math.max(1,Math.min(totalDays,Math.round((effectiveNow-start)/(1000*60*60*24))+1));
+  const daysRemaining=isCurrentPeriod?Math.max(0,Math.round((end-now)/(1000*60*60*24))):0;
+
+  const dailyBurn=daysElapsed>0?spent/daysElapsed:0;
+  const projectedTotal=isCurrentPeriod?dailyBurn*totalDays:spent;
+  const willOverspend=projectedTotal>income&&income>0;
+
+  periodSummary.innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <div style="background:var(--green-soft);border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Income</div>
+        <div style="font-weight:700;color:var(--green);font-size:15px">${fmt(income)}</div>
+      </div>
+      <div style="background:var(--red-soft);border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Spent</div>
+        <div style="font-weight:700;color:var(--red);font-size:15px">${fmt(spent)}</div>
+      </div>
+    </div>
+    <div style="font-size:12.5px;color:var(--text2);margin-bottom:6px">
+      <i class="bi bi-calendar3"></i> <strong>${fmtCutoffPeriod(displayPeriod)}</strong>
+      ${!isCurrentPeriod?'<span style="font-size:11px;color:var(--text3);margin-left:6px">(Past Period)</span>':''}
+    </div>
+    <div style="font-size:12.5px;color:var(--text2)">
+      <i class="bi bi-clock-history"></i> Day ${daysElapsed} of ${totalDays} &nbsp;·&nbsp; ${isCurrentPeriod?daysRemaining+' day'+(daysRemaining!==1?'s':'')+' remaining':'Completed'}
+    </div>
+    <div class="divider" style="margin:12px 0"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12.5px;color:var(--text2)">Net Balance</span>
+      <span style="font-weight:700;font-size:16px;color:${balance>=0?'var(--green)':'var(--red)'}">${fmt(balance)}</span>
+    </div>`;
+
+  if(income===0){
+    projBody.innerHTML=`<div style="font-size:13px;color:var(--text3);padding:12px 0"><i class="bi bi-info-circle"></i> No income recorded for this cutoff period yet. Add your salary to see projections.</div>`;
+    return;
+  }
+  const pct=Math.min(100,Math.round(projectedTotal/income*100));
+  const safeDaily=income/totalDays;
+  projBody.innerHTML=`
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text3);margin-bottom:6px">
+        <span>${isCurrentPeriod?'Projected spending by end of period':'Actual spending this period'}</span>
+        <span style="color:${willOverspend?'var(--red)':'var(--green)'};font-weight:600">${pct}%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${willOverspend?'var(--red)':pct>80?'var(--yellow)':'var(--green)'}"></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div style="background:var(--surface2);border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Daily Burn</div>
+        <div style="font-weight:700;font-size:14px">${fmt(dailyBurn)}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Safe Daily</div>
+        <div style="font-weight:700;font-size:14px;color:var(--green)">${fmt(safeDaily)}</div>
+      </div>
+    </div>
+    <div style="background:${willOverspend?'var(--red-soft)':'var(--green-soft)'};border-radius:8px;padding:10px 14px;font-size:13px">
+      <i class="bi bi-${willOverspend?'exclamation-triangle-fill':'check-circle-fill'}" style="color:${willOverspend?'var(--red)':'var(--green)'}"></i>
+      ${isCurrentPeriod
+        ?(willOverspend
+          ?`At this rate you'll <strong style="color:var(--red)">overspend by ${fmt(projectedTotal-income)}</strong> by ${end.toLocaleDateString('en-US',{month:'short',day:'numeric'})}`
+          :`You're on track to save <strong style="color:var(--green)">${fmt(income-projectedTotal)}</strong> by end of period`)
+        :(willOverspend
+          ?`This period ended <strong style="color:var(--red)">over budget by ${fmt(spent-income)}</strong>`
+          :`This period ended with <strong style="color:var(--green)">${fmt(balance)}</strong> remaining`)
+      }
+    </div>`;
+}
+
+// ════════════════════════════════
 //  DARK MODE
 // ════════════════════════════════
 function toggleDark(){
@@ -117,6 +425,100 @@ function applyDark(){
   document.getElementById('darkIcon').className='bi bi-'+(S.dark?'sun':'moon')+' nav-icon';
   document.getElementById('darkLabel').textContent=S.dark?'Light Mode':'Dark Mode';
 }
+
+// ════════════════════════════════
+//  VIRTUAL CLOCK (device time + testable override)
+// ════════════════════════════════
+// To override from DevTools: setTestDate('2025-05-20T10:30:00') / clearTestDate()
+function getNow(){
+  if(_testDateOffset!==null)return new Date(Date.now()+_testDateOffset);
+  return new Date();
+}
+function setTestDate(isoString){
+  const target=new Date(isoString);
+  _testDateOffset=target.getTime()-Date.now();
+  localStorage.setItem('jns_test_date_offset',String(_testDateOffset));
+  tickClock();renderCutoffBadge();
+  toast('Test date set: '+target.toLocaleString(),'info');
+  updateTestDateStatus();
+}
+function clearTestDate(){
+  _testDateOffset=null;
+  localStorage.removeItem('jns_test_date_offset');
+  tickClock();
+  toast('Back to device time','info');
+  updateTestDateStatus();
+}
+function applyTestDate(){
+  const input=document.getElementById('testDateInput');
+  if(!input||!input.value){toast('Pick a date/time first','error');return;}
+  setTestDate(input.value);
+  // Re-run rollover check whenever the test date changes
+  setTimeout(checkCutoffRollover,100);
+}
+function updateTestDateStatus(){
+  const el=document.getElementById('testDateStatus');
+  if(!el)return;
+  if(_testDateOffset!==null){
+    el.innerHTML=`<span style="color:var(--yellow)"><i class="bi bi-clock-history"></i> Override active: <strong>${getNow().toLocaleString()}</strong></span>`;
+  }else{
+    el.textContent='No override — using device time.';
+  }
+}
+function saveRolloverSetting(on){
+  localStorage.setItem('jns_rollover_auto',on?'1':'0');
+  toast('Rollover auto-check '+(on?'enabled':'disabled'),'info');
+}
+// Restore persisted test offset on load
+(function(){const saved=localStorage.getItem('jns_test_date_offset');if(saved)_testDateOffset=parseFloat(saved);})();
+
+function tickClock(){
+  const now=getNow();
+  const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const dd=String(now.getDate()).padStart(2,'0');
+  const month=months[now.getMonth()];
+  const year=now.getFullYear();
+  const dateEl=document.getElementById('sidebarDate');
+  if(dateEl){dateEl.textContent=`${dd} ${month} ${year}`;dateEl.style.color=_testDateOffset!==null?'var(--yellow)':'';}
+  let h=now.getHours();
+  const ampm=h>=12?'PM':'AM';
+  h=h%12||12;
+  const hh=String(h).padStart(2,'0');
+  const mm=String(now.getMinutes()).padStart(2,'0');
+  const timeEl=document.getElementById('sidebarTime');
+  if(timeEl){timeEl.textContent=`${hh}:${mm} ${ampm}`;timeEl.style.color=_testDateOffset!==null?'var(--yellow)':'var(--accent)';}
+}
+tickClock();
+setInterval(tickClock,10000);
+
+// ════════════════════════════════
+//  TOOLTIP SYSTEM
+// ════════════════════════════════
+(function initTooltips(){
+  const tip=document.createElement('div');
+  tip.id='globalTooltip';
+  tip.className='global-tooltip';
+  document.body.appendChild(tip);
+  let hideTimer=null;
+  document.addEventListener('mouseover',e=>{
+    const el=e.target.closest('.info-icon[data-tip]');
+    if(!el)return;
+    clearTimeout(hideTimer);
+    tip.textContent=el.dataset.tip;
+    tip.classList.add('visible');
+    const rect=el.getBoundingClientRect();
+    const tipW=240;
+    let left=rect.left+rect.width/2-tipW/2;
+    left=Math.max(8,Math.min(left,window.innerWidth-tipW-8));
+    let top=rect.top-8;
+    tip.style.cssText=`left:${left}px;top:${top}px;width:${tipW}px;transform:translateY(-100%)`;
+  });
+  document.addEventListener('mouseout',e=>{
+    const el=e.target.closest('.info-icon[data-tip]');
+    if(!el)return;
+    hideTimer=setTimeout(()=>tip.classList.remove('visible'),120);
+  });
+})();
 
 // ════════════════════════════════
 //  SIDEBAR (mobile)
@@ -154,51 +556,79 @@ function navigate(page){
 
 function initDashFilters(){
   const yEl=document.getElementById('dashFilterYear');
-  if(yEl.options.length<=1){
-    const now=new Date();
-    const years=new Set(S.transactions.map(t=>t.date.slice(0,4)));
-    years.add(String(now.getFullYear()));
-    const sorted=[...years].sort().reverse();
-    yEl.innerHTML=sorted.map(y=>`<option value="${y}" ${y===String(now.getFullYear())?'selected':''}>${y}</option>`).join('');
-    document.getElementById('dashFilterMonth').value=now.getMonth();
-  }
+  const mEl=document.getElementById('dashFilterMonth');
+  const now=getNow();
+  // Always rebuild year list so newly imported/synced years appear
+  const years=new Set(S.transactions.map(t=>t.date.slice(0,4)));
+  years.add(String(now.getFullYear()));
+  const sorted=[...years].sort().reverse();
+  const curVal=yEl.value||String(now.getFullYear());
+  yEl.innerHTML=sorted.map(y=>`<option value="${y}" ${y===curVal?'selected':''}>${y}</option>`).join('');
+  if(!yEl.value)yEl.value=String(now.getFullYear());
+  // Set month only on first load (don't override user's selection)
+  if(!mEl.dataset.initialized){mEl.value=now.getMonth();mEl.dataset.initialized='1';}
+  // Show/hide controls based on current mode
+  const mode=document.getElementById('dashFilterMode')?.value||'month';
+  yEl.style.display=mode==='month'?'':'none';
+  mEl.style.display=mode==='month'?'':'none';
+  const cEl=document.getElementById('dashFilterCutoff');
+  if(cEl)cEl.style.display=mode==='cutoff'?'':'none';
 }
 function onDashFilterModeChange(){
   const mode=document.getElementById('dashFilterMode').value;
   const yEl=document.getElementById('dashFilterYear');
   const mEl=document.getElementById('dashFilterMonth');
+  const cEl=document.getElementById('dashFilterCutoff');
   yEl.style.display=mode==='month'?'':'none';
   mEl.style.display=mode==='month'?'':'none';
+  if(cEl)cEl.style.display=mode==='cutoff'?'':'none';
+  if(mode==='cutoff')buildCutoffOptions('dashFilterCutoff');
+  _recentPage=0;
   renderDashboard();
 }
 
 // ════════════════════════════════
 //  DASHBOARD
 // ════════════════════════════════
-let pieInst=null;
+let _recentPage=0;
 function getDashTxs(){
-  const mode=document.getElementById('dashFilterMode')?.value||'period';
+  const mode=document.getElementById('dashFilterMode')?.value||'month';
   if(mode==='month'){
     const year=parseInt(document.getElementById('dashFilterYear')?.value||new Date().getFullYear());
     const month=parseInt(document.getElementById('dashFilterMonth')?.value??new Date().getMonth());
     return getMonthTxs(year,month);
   }
+  if(mode==='cutoff'){
+    const key=document.getElementById('dashFilterCutoff')?.value||'';
+    const period=parseCutoffKey(key);
+    if(period)return getCutoffPeriodTxs(period);
+    return getPeriodTxs();
+  }
   return getPeriodTxs();
 }
 function getDashLabel(){
-  const mode=document.getElementById('dashFilterMode')?.value||'period';
+  const mode=document.getElementById('dashFilterMode')?.value||'month';
   if(mode==='month'){
     const year=document.getElementById('dashFilterYear')?.value||new Date().getFullYear();
     const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
     const month=parseInt(document.getElementById('dashFilterMonth')?.value??new Date().getMonth());
     return`${monthNames[month]} ${year}`;
   }
+  if(mode==='cutoff'){
+    const key=document.getElementById('dashFilterCutoff')?.value||'';
+    const period=parseCutoffKey(key);
+    if(period)return'CutOff: '+fmtCutoffPeriod(period);
+    return'CutOff Period';
+  }
   return getPeriodLabel();
 }
+let pieInst=null;
 function renderDashboard(){
   initDashFilters();
+  renderCutoffBadge();
   document.getElementById('dashPeriodLabel').textContent=getDashLabel();
   const txs=getDashTxs();
+  renderProjectionCard(txs);
   const inc=txs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
   const exp=txs.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
   const bal=inc-exp;
@@ -209,17 +639,34 @@ function renderDashboard(){
   bel.className='stat-number '+(bal>=0?'blue':'red');
   document.getElementById('dashTxCount').textContent=txs.length;
 
-  // Recent (always show last 6 overall)
+  // Recent Transactions — always use the already-filtered txs so the filter is respected
   const rec=document.getElementById('recentTxList');
-  const last5=[...S.transactions].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
-  if(!last5.length){rec.innerHTML='<div class="empty-state" style="padding:24px"><i class="bi bi-inbox"></i><p>No transactions yet</p></div>';return;}
-  rec.innerHTML=last5.map(t=>{
-    const cat=getCat(t.catId);
-    return`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)">
-      <div class="gap-6">${catIcon(cat,13)}<span style="font-size:13px;color:var(--text)">${t.desc}</span></div>
-      <span style="font-size:13px;font-weight:600;color:${t.type==='income'?'var(--green)':'var(--red)'}">${t.type==='expense'?'-':'+'}${fmt(t.amount)}</span>
-    </div>`;
-  }).join('');
+  const recentLabel=document.getElementById('recentTxLabel');
+  const recentTxs=[...txs].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(recentLabel)recentLabel.textContent=`Recent — ${getDashLabel()}`;
+
+  const PAGE_SIZE=10;
+  const totalPages=Math.max(1,Math.ceil(recentTxs.length/PAGE_SIZE));
+  if(_recentPage>=totalPages)_recentPage=totalPages-1;
+  const pageSlice=recentTxs.slice(_recentPage*PAGE_SIZE,(_recentPage+1)*PAGE_SIZE);
+
+  if(!recentTxs.length){
+    rec.innerHTML='<div class="empty-state" style="padding:24px"><i class="bi bi-inbox"></i><p>No transactions for this period</p></div>';
+  } else {
+    const rows=pageSlice.map(t=>{
+      const cat=getCat(t.catId);
+      return`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)">
+        <div class="gap-6">${catIcon(cat,13)}<span style="font-size:13px;color:var(--text)">${t.desc}</span><span style="font-size:11px;color:var(--text3);margin-left:4px">${t.date}</span></div>
+        <span style="font-size:13px;font-weight:600;color:${t.type==='income'?'var(--green)':'var(--red)'}">${t.type==='expense'?'-':'+'}${fmt(t.amount)}</span>
+      </div>`;
+    }).join('');
+    const pagination=totalPages>1?`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0 2px;margin-top:4px">
+      <button onclick="_recentPage=Math.max(0,_recentPage-1);renderDashboard()" ${_recentPage===0?'disabled':''} style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;color:var(--text2);font-size:12px"><i class="bi bi-chevron-left"></i></button>
+      <span style="font-size:12px;color:var(--text3)">Page ${_recentPage+1} of ${totalPages}</span>
+      <button onclick="_recentPage=Math.min(${totalPages-1},_recentPage+1);renderDashboard()" ${_recentPage===totalPages-1?'disabled':''} style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;color:var(--text2);font-size:12px"><i class="bi bi-chevron-right"></i></button>
+    </div>`:'';
+    rec.innerHTML=rows+pagination;
+  }
 
   // Pie
   const expTxs=txs.filter(t=>t.type==='expense');
@@ -262,7 +709,7 @@ function openTxModal(id){
   document.getElementById('txType').value=tx?.type||'expense';
   document.getElementById('txAmount').value=tx?.amount||'';
   document.getElementById('txDesc').value=tx?.desc||'';
-  document.getElementById('txDate').value=tx?.date||new Date().toISOString().slice(0,10);
+  document.getElementById('txDate').value=tx?.date||getNow().toISOString().slice(0,10);
   populateTxCatSelect(tx?.type||'expense', tx?.catId||null);
   document.getElementById('txModal').classList.add('open');
 }
@@ -365,7 +812,7 @@ function fillTxFilters(){
   sel.innerHTML='<option value="">All Categories</option>'+sortedCats().map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
   // Year filter
   const yEl=document.getElementById('txFilterYear');
-  const now=new Date();
+  const now=getNow();
   const years=new Set(S.transactions.map(t=>t.date.slice(0,4)));
   years.add(String(now.getFullYear()));
   const sortedYears=[...years].sort().reverse();
@@ -376,19 +823,78 @@ function fillTxFilters(){
     mEl.value=String(now.getMonth());
     mEl.dataset.initialized='1';
   }
+  // Cutoff filter toggle visibility
+  const modeEl=document.getElementById('txFilterMode');
+  const cEl=document.getElementById('txFilterCutoff');
+  const cmEl=document.getElementById('txFilterCutoffMonth');
+  const cyEl=document.getElementById('txFilterCutoffYear');
+  if(modeEl&&cEl){
+    const isCutoff=modeEl.value==='cutoff';
+    yEl.style.display=isCutoff?'none':'';
+    mEl.style.display=isCutoff?'none':'';
+    cEl.style.display=isCutoff?'':'';
+    if(cmEl)cmEl.style.display=isCutoff?'':'';
+    if(cyEl)cyEl.style.display=isCutoff?'':'';
+    if(!isCutoff){cEl.style.display='none';}
+    if(cmEl&&!isCutoff)cmEl.style.display='none';
+    if(cyEl&&!isCutoff)cyEl.style.display='none';
+    if(isCutoff){
+      // Populate cutoff year selector
+      if(cyEl&&!cyEl.dataset.initialized){
+        cyEl.innerHTML=sortedYears.map(y=>`<option value="${y}" ${y===String(now.getFullYear())?'selected':''} >${y}</option>`).join('');
+        cyEl.dataset.initialized='1';
+      }
+      // Populate cutoff month selector (only on first init)
+      if(cmEl&&!cmEl.dataset.initialized){
+        cmEl.value=String(now.getMonth());
+        cmEl.dataset.initialized='1';
+      }
+      // Build the 2 period options for the selected month
+      const selYear=parseInt(cyEl?cyEl.value:now.getFullYear());
+      const selMonth=parseInt(cmEl?cmEl.value:now.getMonth());
+      buildCutoffOptionsForMonth('txFilterCutoff',selYear,selMonth);
+    }
+  }
+}
+function onTxFilterModeChange(){
+  // Reset cutoff month/year initialized flags so they re-populate for the new mode
+  const cmEl=document.getElementById('txFilterCutoffMonth');
+  const cyEl=document.getElementById('txFilterCutoffYear');
+  if(cmEl)cmEl.dataset.initialized='';
+  if(cyEl)cyEl.dataset.initialized='';
+  fillTxFilters();
+  renderTransactions();
+}
+function onTxCutoffMonthChange(){
+  // Rebuild cutoff period options when the month/year selector changes
+  const cyEl=document.getElementById('txFilterCutoffYear');
+  const cmEl=document.getElementById('txFilterCutoffMonth');
+  const now=getNow();
+  const selYear=parseInt(cyEl?cyEl.value:now.getFullYear());
+  const selMonth=parseInt(cmEl?cmEl.value:now.getMonth());
+  buildCutoffOptionsForMonth('txFilterCutoff',selYear,selMonth);
+  renderTransactions();
 }
 function renderTransactions(){
   const search=document.getElementById('txSearch').value.toLowerCase();
   const type=document.getElementById('txFilterType').value;
   const catId=document.getElementById('txFilterCat').value;
-  const filterYear=document.getElementById('txFilterYear').value;
-  const filterMonth=document.getElementById('txFilterMonth').value;
+  const modeEl=document.getElementById('txFilterMode');
+  const filterMode=modeEl?modeEl.value:'month';
   let txs=[...S.transactions].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(filterMode==='cutoff'){
+    const key=document.getElementById('txFilterCutoff')?.value||'';
+    const period=parseCutoffKey(key);
+    if(period)txs=txs.filter(t=>{const d=new Date(t.date+'T00:00:00');return d>=period.start&&d<=period.end;});
+  } else {
+    const filterYear=document.getElementById('txFilterYear').value;
+    const filterMonth=document.getElementById('txFilterMonth').value;
+    if(filterYear)txs=txs.filter(t=>t.date.startsWith(filterYear));
+    if(filterMonth!=='')txs=txs.filter(t=>new Date(t.date).getMonth()===parseInt(filterMonth));
+  }
   if(search)txs=txs.filter(t=>t.desc.toLowerCase().includes(search));
   if(type)txs=txs.filter(t=>t.type===type);
   if(catId)txs=txs.filter(t=>t.catId===catId);
-  if(filterYear)txs=txs.filter(t=>t.date.startsWith(filterYear));
-  if(filterMonth!=='')txs=txs.filter(t=>new Date(t.date).getMonth()===parseInt(filterMonth));
   document.getElementById('txEmpty').style.display=txs.length?'none':'block';
   document.getElementById('txTableBody').innerHTML=txs.map(t=>{
     const cat=getCat(t.catId);
@@ -411,7 +917,7 @@ function renderTransactions(){
 // ════════════════════════════════
 function initCalSelects(){
   const yEl=document.getElementById('calYear');
-  const now=new Date();
+  const now=getNow();
   if(!yEl.options.length){
     for(let y=now.getFullYear()-3;y<=now.getFullYear()+1;y++){
       yEl.innerHTML+=`<option value="${y}" ${y===now.getFullYear()?'selected':''}>${y}</option>`;
@@ -420,7 +926,7 @@ function initCalSelects(){
   document.getElementById('calMonth').value=now.getMonth();
 }
 function calToday(){
-  const now=new Date();
+  const now=getNow();
   document.getElementById('calYear').value=now.getFullYear();
   document.getElementById('calMonth').value=now.getMonth();
   renderCalendar();
@@ -432,7 +938,7 @@ function renderCalendar(){
   document.getElementById('calDayHeaders').innerHTML=days.map(d=>`<div class="cal-header-day">${d}</div>`).join('');
   const firstDay=new Date(year,month,1).getDay();
   const daysInMonth=new Date(year,month+1,0).getDate();
-  const today=new Date();
+  const today=getNow();
   const txs=getMonthTxs(year,month);
   // build day map
   const dayMap={};
@@ -520,7 +1026,7 @@ function calDeleteTx(id,dateStr){
 // ════════════════════════════════
 function initSplitSelects(){
   const yEl=document.getElementById('splitYear');
-  const now=new Date();
+  const now=getNow();
   if(!yEl.options.length){
     for(let y=now.getFullYear()-3;y<=now.getFullYear()+1;y++){
       yEl.innerHTML+=`<option value="${y}" ${y===now.getFullYear()?'selected':''}>${y}</option>`;
@@ -540,7 +1046,7 @@ function toggleNeedsPaid(itemId){
     const txKey='jns_needs_tx_'+key;
     if(nowPaid){
       // Create an expense transaction dated today
-      const today=new Date().toISOString().slice(0,10);
+      const today=getNow().toISOString().slice(0,10);
       const newTx={id:uid(),type:'expense',amount:item.amount,desc:item.name+' (Needs)',catId:item.catId||'',date:today,_needsKey:key};
       S.transactions.push(newTx);
       S.needsPaid[txKey]=newTx.id; // store the txId so we can delete it later
@@ -740,13 +1246,12 @@ function renderGoals(){
 let trendInst=null,rPieInst=null;
 function initReportFilters(){
   const yEl=document.getElementById('reportFilterYear');
-  const now=new Date();
+  const now=getNow();
   if(yEl&&!yEl.options.length){
     const years=new Set(S.transactions.map(t=>t.date.slice(0,4)));
     years.add(String(now.getFullYear()));
     const sorted=[...years].sort().reverse();
     yEl.innerHTML='<option value="">All Years</option>'+sorted.map(y=>`<option value="${y}" ${y===String(now.getFullYear())?'selected':''}>${y}</option>`).join('');
-    // Default month to current month
     const mEl=document.getElementById('reportFilterMonth');
     if(mEl)mEl.value=String(now.getMonth());
   }
@@ -833,11 +1338,52 @@ function renderReports(){
     type:'doughnut',data:{labels:pl,datasets:[{data:pd,backgroundColor:pc,borderWidth:0}]},
     options:{plugins:{legend:{position:'bottom',labels:{color:'var(--text2)',font:{family:'DM Sans',size:11},boxWidth:10,padding:12}}},cutout:'65%',responsive:true,maintainAspectRatio:false}
   });
+  renderCutoffCompare();
 }
 function getLast12(){
-  const r=[];const now=new Date();
+  const r=[];const now=getNow();
   for(let i=11;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1);r.push(d.toISOString().slice(0,7));}
   return r;
+}
+
+// Render cutoff comparison chart & table in Reports
+let cutoffCompareInst=null;
+function renderCutoffCompare(){
+  const card=document.getElementById('cutoffCompareCard');
+  if(!card)return;
+  if(!S.cutoff?.enabled||!getCutoffDays().length){card.style.display='none';return;}
+  card.style.display='';
+  const periods=getAllCutoffPeriods().slice(0,8).reverse(); // last 8 periods, oldest first
+  if(!periods.length){card.style.display='none';return;}
+  const labels=periods.map(p=>fmtCutoffPeriod(p));
+  const incomes=periods.map(p=>getCutoffPeriodTxs(p).filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0));
+  const expenses=periods.map(p=>getCutoffPeriodTxs(p).filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0));
+  if(cutoffCompareInst)cutoffCompareInst.destroy();
+  cutoffCompareInst=new Chart(document.getElementById('cutoffCompareChart').getContext('2d'),{
+    type:'bar',
+    data:{labels,datasets:[
+      {label:'Income',data:incomes,backgroundColor:'rgba(16,185,129,0.75)',borderRadius:5},
+      {label:'Expenses',data:expenses,backgroundColor:'rgba(239,68,68,0.75)',borderRadius:5},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{labels:{color:getComputedStyle(document.documentElement).getPropertyValue('--text2'),font:{family:'DM Sans',size:11}}}},
+      scales:{x:{ticks:{color:'var(--text3)',maxRotation:30,font:{size:10}},grid:{display:false}},y:{ticks:{color:'var(--text3)'},grid:{color:'var(--border)'}}}}
+  });
+  // Table
+  document.getElementById('cutoffCompareTable').innerHTML=`
+    <div class="table-wrap"><table>
+      <thead><tr><th>Period</th><th>Income</th><th>Expenses</th><th>Net</th></tr></thead>
+      <tbody>${[...periods].reverse().map((p,i)=>{
+        const ri=periods.length-1-i;
+        const net=incomes[ri]-expenses[ri];
+        return`<tr>
+          <td style="font-size:12px">${labels[ri]}</td>
+          <td class="amount-positive">${fmt(incomes[ri])}</td>
+          <td class="amount-negative">${fmt(expenses[ri])}</td>
+          <td style="font-weight:600;color:${net>=0?'var(--green)':'var(--red)'}">${fmt(net)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
 }
 function exportCSV(){
   const rows=[['Date','Type','Category','Description','Amount']];
@@ -862,6 +1408,114 @@ function renderSettings(){
   renderPeriodOpts();renderCatList();renderNeedsList();renderWantsList();renderGdriveUI();
   renderBudgetRulePanel();
   updateNeedsWantsPanelDesc();
+  renderCutoffSettingsPanel();
+  renderRolloverPanel();
+}
+function renderRolloverPanel(){
+  const autoEl=document.getElementById('rolloverAutoCheck');
+  if(autoEl)autoEl.checked=localStorage.getItem('jns_rollover_auto')!=='0';
+  const input=document.getElementById('testDateInput');
+  if(input){
+    const now=getNow();
+    const pad=n=>String(n).padStart(2,'0');
+    input.value=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  }
+  updateTestDateStatus();
+  renderRolloverFlagsList();
+}
+
+function renderRolloverFlagsList(){
+  const el=document.getElementById('rolloverFlagsList');
+  if(!el)return;
+  const keys=Object.keys(localStorage).filter(k=>k.startsWith('jns_rollover_'));
+  if(!keys.length){el.innerHTML='<span style="color:var(--text3)"><i class="bi bi-check-circle"></i> No rollover flags stored.</span>';return;}
+  el.innerHTML=keys.map(k=>{
+    const val=localStorage.getItem(k);
+    const period=k.replace('jns_rollover_','');
+    const badge=val==='1'
+      ?`<span style="background:var(--green-soft);color:var(--green);padding:1px 7px;border-radius:6px;font-size:11px">confirmed</span>`
+      :`<span style="background:var(--surface2);color:var(--text3);padding:1px 7px;border-radius:6px;font-size:11px">dismissed</span>`;
+    return`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span><i class="bi bi-flag" style="color:var(--text3);margin-right:5px"></i>${period} ${badge}</span>
+      <button class="btn btn-icon btn-sm" title="Remove this flag" onclick="removeSingleRolloverFlag('${k}')"><i class="bi bi-trash3" style="color:var(--red)"></i></button>
+    </div>`;
+  }).join('');
+}
+
+function removeSingleRolloverFlag(key){
+  localStorage.removeItem(key);
+  renderRolloverFlagsList();
+  toast('Flag cleared — you can re-test this period now','success');
+}
+
+function resetRolloverFlags(){
+  const keys=Object.keys(localStorage).filter(k=>k.startsWith('jns_rollover_'));
+  if(!keys.length){toast('No rollover flags to clear','info');return;}
+  keys.forEach(k=>localStorage.removeItem(k));
+  renderRolloverFlagsList();
+  toast(`${keys.length} rollover flag${keys.length>1?'s':''} cleared — modal will show again on next check`,'success');
+}
+
+// ════════════════════════════════
+//  CUTOFF SETTINGS
+// ════════════════════════════════
+function renderCutoffSettingsPanel(){
+  const co=S.cutoff||{enabled:false,days:[]};
+  const enableEl=document.getElementById('cutoffEnabled');
+  if(enableEl)enableEl.checked=!!co.enabled;
+  const configEl=document.getElementById('cutoffDaysConfig');
+  if(configEl)configEl.style.display=co.enabled?'':'none';
+  renderCutoffDaysList();
+}
+function onCutoffToggle(on){
+  if(!S.cutoff)S.cutoff={enabled:false,days:[]};
+  S.cutoff.enabled=on;
+  document.getElementById('cutoffDaysConfig').style.display=on?'':'none';
+  // Auto-add default days if none set
+  if(on&&!S.cutoff.days.length){
+    S.cutoff.days=[5,20];
+    persist();
+    renderCutoffDaysList();
+    toast('Default cutoff days (5th & 20th) added','info');
+  }
+}
+function renderCutoffDaysList(){
+  const el=document.getElementById('cutoffDaysList');
+  if(!el)return;
+  const days=getCutoffDays();
+  if(!days.length){el.innerHTML='<span style="font-size:13px;color:var(--text3)">No cutoff days set yet.</span>';return;}
+  el.innerHTML=days.map(d=>`
+    <div class="cutoff-day-chip">
+      <span>${d}${d===1?'st':d===2?'nd':d===3?'rd':'th'} of month</span>
+      <button onclick="removeCutoffDay(${d})" style="background:none;border:none;cursor:pointer;padding:0;margin-left:4px;color:var(--text3);display:flex;align-items:center">
+        <i class="bi bi-x" style="font-size:14px"></i>
+      </button>
+    </div>`).join('');
+}
+function addCutoffDay(){
+  const input=document.getElementById('cutoffDayInput');
+  const day=parseInt(input.value);
+  if(!day||day<1||day>28){toast('Enter a valid day between 1 and 28','error');return;}
+  if(!S.cutoff)S.cutoff={enabled:true,days:[]};
+  if(S.cutoff.days.includes(day)){toast('That day is already added','error');return;}
+  if(S.cutoff.days.length>=4){toast('Maximum 4 cutoff days allowed','error');return;}
+  S.cutoff.days.push(day);
+  input.value='';
+  renderCutoffDaysList();
+}
+function removeCutoffDay(day){
+  if(!S.cutoff)return;
+  S.cutoff.days=S.cutoff.days.filter(d=>d!==day);
+  renderCutoffDaysList();
+}
+function saveCutoff(){
+  if(!S.cutoff)S.cutoff={enabled:false,days:[]};
+  S.cutoff.enabled=document.getElementById('cutoffEnabled').checked;
+  if(S.cutoff.enabled&&!S.cutoff.days.length){toast('Add at least one cutoff day','error');return;}
+  persist();
+  toast('CutOff settings saved','success');
+  renderCutoffBadge();
+  renderDashboard();
 }
 function savePeriod(){
   const type=document.getElementById('settingPeriod').value;
@@ -1236,8 +1890,129 @@ async function gdriveRestore(){
 }
 
 // ════════════════════════════════
+//  CUTOFF ROLLOVER
+// ════════════════════════════════
+let _pendingRollover=null;
+
+function getRolloverCat(){
+  // Find or create the Rollover category
+  let cat=S.categories.find(c=>c._isRollover);
+  if(!cat){
+    cat={id:uid(),name:'Budget Rollover',color:'#8B5CF6',icon:'bi-arrow-repeat',_isRollover:true};
+    S.categories.push(cat);
+    persist();
+  }
+  return cat;
+}
+
+function checkCutoffRollover(){
+  if(!S.cutoff?.enabled||!getCutoffDays().length)return;
+  const now=getNow();
+  const todayStr=now.toISOString().slice(0,10);
+  const days=getCutoffDays();
+  const todayDay=now.getDate();
+  // Only trigger on cutoff days themselves
+  if(!days.includes(todayDay)){
+    // Only show this debug toast when a test date override is active
+    if(_testDateOffset!==null){
+      toast(`Rollover skipped — day ${todayDay} is not a cutoff day (${days.join(', ')})`, 'error');
+    }
+    return;
+  }
+  // Find the period that just ENDED — it ends the day before today (the cutoff day)
+  const yesterday=new Date(now);yesterday.setDate(now.getDate()-1);
+  const prevPeriod=getCutoffPeriodFor(yesterday.toISOString().slice(0,10));
+  if(!prevPeriod){
+    toast('Rollover skipped — could not determine previous cutoff period','error');
+    return;
+  }
+  // Check we haven't already processed this rollover
+  const rolloverKey='jns_rollover_'+prevPeriod.start.toISOString().slice(0,10);
+  const rolloverStatus=localStorage.getItem(rolloverKey);
+  if(rolloverStatus==='1'){
+    if(_testDateOffset!==null) toast('Rollover already confirmed for this period','info');
+    return;
+  }
+  // If dismissed in the same real-calendar day (not test date), skip it silently.
+  // But if a test date override is active, always re-show so testers can verify.
+  if(rolloverStatus==='dismissed'&&_testDateOffset===null)return;
+  // Calculate remaining balance from previous period
+  const prevTxs=getCutoffPeriodTxs(prevPeriod);
+  const prevIncome=prevTxs.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);
+  const prevExpenses=prevTxs.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
+  const remaining=prevIncome-prevExpenses;
+  if(remaining<=0){
+    toast(
+      remaining===0
+        ? 'No rollover — previous period ended with ₱0.00 balance'
+        : `No rollover — expenses exceeded income by ${fmt(Math.abs(remaining))} last period`,
+      'info'
+    );
+    return;
+  }
+  _pendingRollover={remaining,prevPeriod,rolloverKey,todayStr};
+  // Show confirmation modal
+  const body=document.getElementById('rolloverModalBody');
+  if(body){
+    const incomeLines=prevTxs.filter(t=>t.type==='income').map(t=>`<div style="display:flex;justify-content:space-between"><span>${t.desc}</span><span style="color:var(--green);font-weight:600">${fmt(t.amount)}</span></div>`).join('');
+    const expenseTotal=fmt(prevExpenses);
+    body.innerHTML=`
+      <div style="background:var(--accent-soft);border-radius:10px;padding:14px 16px;margin-bottom:16px;display:flex;align-items:center;gap:14px">
+        <i class="bi bi-piggy-bank" style="font-size:28px;color:var(--accent);flex-shrink:0"></i>
+        <div>
+          <div style="font-weight:700;font-size:16px;color:var(--accent)">${fmt(remaining)}</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:2px">Unspent balance from ${fmtCutoffPeriod(prevPeriod)}</div>
+        </div>
+      </div>
+      <div style="font-size:12.5px;background:var(--surface2);border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;flex-direction:column;gap:4px">
+        <div style="font-weight:600;margin-bottom:4px;color:var(--text2)">Period Summary</div>
+        ${incomeLines||'<div style="color:var(--text3)">No income recorded in this period</div>'}
+        <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between"><span>Total Expenses</span><span style="color:var(--red);font-weight:600">−${expenseTotal}</span></div>
+        <div style="display:flex;justify-content:space-between;font-weight:700"><span>Remaining</span><span style="color:var(--accent)">${fmt(remaining)}</span></div>
+      </div>
+      <p>Would you like to carry this over into the new period as a <strong style="color:#8B5CF6">Budget Rollover</strong> income entry? It will be recorded as today's date (${todayStr}).</p>
+      <p style="margin-top:10px;font-size:12px;color:var(--text3)">You can always dismiss this and record it manually later.</p>`;
+  }
+  document.getElementById('rolloverModal').classList.add('open');
+}
+
+function confirmRollover(){
+  if(!_pendingRollover)return;
+  const{remaining,prevPeriod,rolloverKey,todayStr}=_pendingRollover;
+  const cat=getRolloverCat();
+  const tx={
+    id:uid(),
+    type:'income',
+    amount:remaining,
+    desc:`Budget Rollover — ${fmtCutoffPeriod(prevPeriod)}`,
+    catId:cat.id,
+    date:todayStr,
+    _rollover:true
+  };
+  S.transactions.push(tx);
+  persist();
+  localStorage.setItem(rolloverKey,'1');
+  _pendingRollover=null;
+  closeRolloverModal();
+  renderDashboard();
+  renderTransactions();
+  toast(`${fmt(remaining)} rolled over to new period`,'success');
+}
+
+function closeRolloverModal(){
+  if(_pendingRollover){
+    // Mark as dismissed so we don't show again today
+    localStorage.setItem(_pendingRollover.rolloverKey,'dismissed');
+    _pendingRollover=null;
+  }
+  document.getElementById('rolloverModal').classList.remove('open');
+}
+
+// ════════════════════════════════
 //  INIT
 // ════════════════════════════════
 applyDark();
 initDashFilters();
 renderDashboard();
+// Check for cutoff rollover after a short delay so the UI is ready
+setTimeout(checkCutoffRollover,800);
